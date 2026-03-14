@@ -274,10 +274,125 @@ impl FE3Handler {
 // ---------------------------------------------------------------------------
 
 /// Minimal HTML entity decoder covering the entities used in SOAP responses.
-fn html_decode(s: &str) -> String {
+pub(crate) fn html_decode(s: &str) -> String {
     s.replace("&amp;", "&")
         .replace("&lt;", "<")
         .replace("&gt;", ">")
         .replace("&quot;", "\"")
         .replace("&apos;", "'")
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn html_decode_all_entities() {
+        assert_eq!(html_decode("a &amp; b"), "a & b");
+        assert_eq!(html_decode("&lt;tag&gt;"), "<tag>");
+        assert_eq!(html_decode("say &quot;hello&quot;"), "say \"hello\"");
+        assert_eq!(html_decode("it&apos;s"), "it's");
+    }
+
+    #[test]
+    fn html_decode_no_entities() {
+        assert_eq!(html_decode("plain text"), "plain text");
+    }
+
+    #[test]
+    fn html_decode_chained_entities() {
+        // Replacements are sequential: &amp;lt; -> &lt; -> <
+        assert_eq!(html_decode("&amp;lt;"), "<");
+    }
+
+    #[test]
+    fn process_update_ids_empty_xml() {
+        let xml = r#"<?xml version="1.0"?><root></root>"#;
+        let (ids, revs) = FE3Handler::process_update_ids(xml).unwrap();
+        assert!(ids.is_empty());
+        assert!(revs.is_empty());
+    }
+
+    #[test]
+    fn process_update_ids_parses_secured_fragment() {
+        // Minimal SyncUpdates-style XML with one SecuredFragment node.
+        let xml = r#"<?xml version="1.0"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+  <s:Body>
+    <SyncUpdatesResult>
+      <NewUpdates>
+        <UpdateInfo>
+          <ID>1</ID>
+          <Xml>
+            <UpdateIdentity UpdateID="abc-123" RevisionNumber="200"/>
+            <Properties>
+              <SecuredFragment/>
+            </Properties>
+          </Xml>
+        </UpdateInfo>
+      </NewUpdates>
+    </SyncUpdatesResult>
+  </s:Body>
+</s:Envelope>"#;
+        let (ids, revs) = FE3Handler::process_update_ids(xml).unwrap();
+        assert_eq!(ids, vec!["abc-123"]);
+        assert_eq!(revs, vec!["200"]);
+    }
+
+    #[test]
+    fn process_update_ids_skips_nodes_without_secured_fragment() {
+        let xml = r#"<?xml version="1.0"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+  <s:Body>
+    <SyncUpdatesResult>
+      <NewUpdates>
+        <UpdateInfo>
+          <ID>1</ID>
+          <Xml>
+            <UpdateIdentity UpdateID="no-fragment" RevisionNumber="1"/>
+            <Properties/>
+          </Xml>
+        </UpdateInfo>
+      </NewUpdates>
+    </SyncUpdatesResult>
+  </s:Body>
+</s:Envelope>"#;
+        let (ids, _) = FE3Handler::process_update_ids(xml).unwrap();
+        assert!(ids.is_empty());
+    }
+
+    #[test]
+    fn process_update_ids_multiple() {
+        let xml = r#"<?xml version="1.0"?>
+<root>
+  <Update>
+    <UpdateIdentity UpdateID="id-1" RevisionNumber="10"/>
+    <Properties>
+      <SecuredFragment/>
+    </Properties>
+  </Update>
+  <Update>
+    <UpdateIdentity UpdateID="id-2" RevisionNumber="20"/>
+    <Properties>
+      <SecuredFragment/>
+    </Properties>
+  </Update>
+</root>"#;
+        let (ids, revs) = FE3Handler::process_update_ids(xml).unwrap();
+        assert_eq!(ids.len(), 2);
+        assert_eq!(ids[0], "id-1");
+        assert_eq!(revs[0], "10");
+        assert_eq!(ids[1], "id-2");
+        assert_eq!(revs[1], "20");
+    }
+
+    #[test]
+    fn process_update_ids_invalid_xml_returns_error() {
+        let result = FE3Handler::process_update_ids("not xml at all <<<");
+        assert!(result.is_err());
+    }
 }

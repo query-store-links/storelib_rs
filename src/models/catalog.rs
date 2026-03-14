@@ -464,3 +464,63 @@ pub struct AllowedPlatform {
     pub min_version: Option<serde_json::Value>,
     pub platform_name: Option<String>,
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- de_str_or_i64 via UsageDatum -----------------------------------------
+
+    #[test]
+    fn usage_datum_integer_counts() {
+        let json = r#"{"AverageRating":4.5,"AggregateTimeSpan":"AllTime","RatingCount":100,"PurchaseCount":50,"TrialCount":10,"RentalCount":0,"PlayCount":5}"#;
+        let d: UsageDatum = serde_json::from_str(json).unwrap();
+        assert_eq!(d.rating_count, Some(100));
+        assert_eq!(d.purchase_count, Some(50));
+        assert_eq!(d.trial_count, Some(10));
+        assert_eq!(d.rental_count, Some(0));
+        assert_eq!(d.play_count, Some(5));
+    }
+
+    #[test]
+    fn usage_datum_string_counts() {
+        // MS Store returns some counts as quoted strings.
+        let json = r#"{"RatingCount":"42","PurchaseCount":"0","TrialCount":"7","RentalCount":"0","PlayCount":"99"}"#;
+        let d: UsageDatum = serde_json::from_str(json).unwrap();
+        assert_eq!(d.rating_count, Some(42));
+        assert_eq!(d.purchase_count, Some(0));
+        assert_eq!(d.trial_count, Some(7));
+        assert_eq!(d.rental_count, Some(0));
+        assert_eq!(d.play_count, Some(99));
+    }
+
+    #[test]
+    fn usage_datum_null_counts() {
+        let json = r#"{"RatingCount":null,"PurchaseCount":null}"#;
+        let d: UsageDatum = serde_json::from_str(json).unwrap();
+        assert_eq!(d.rating_count, None);
+        assert_eq!(d.purchase_count, None);
+    }
+
+    #[test]
+    fn usage_datum_missing_counts_default_to_none() {
+        let json = r#"{}"#;
+        let d: UsageDatum = serde_json::from_str(json).unwrap();
+        assert_eq!(d.rating_count, None);
+        assert_eq!(d.purchase_count, None);
+    }
+
+    // -- DisplayCatalogModel round-trip ---------------------------------------
+
+    #[test]
+    fn display_catalog_model_deserializes_minimal_json() {
+        let json = r#"{"Product":null,"BigIds":null,"HasMorePages":false,"Products":[],"TotalResultCount":0}"#;
+        let m: DisplayCatalogModel = serde_json::from_str(json).unwrap();
+        assert!(!m.has_more_pages.unwrap_or(true));
+        assert_eq!(m.total_result_count, Some(0));
+    }
+}

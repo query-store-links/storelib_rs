@@ -451,3 +451,54 @@ impl Locale {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn production_locale_trail() {
+        let trail = Locale::production().dcat_trail();
+        assert_eq!(trail, "market=US&languages=en-US,en&catalogsource=apps");
+    }
+
+    #[test]
+    fn locale_without_neutral() {
+        let locale = Locale::new(Market::Us, Lang::En, false);
+        let trail = locale.dcat_trail();
+        assert_eq!(trail, "market=US&languages=en-US&catalogsource=apps");
+        assert!(!trail.contains(",en"));
+    }
+
+    #[test]
+    fn locale_german_market() {
+        let locale = Locale::new(Market::De, Lang::De, false);
+        let trail = locale.dcat_trail();
+        assert_eq!(trail, "market=DE&languages=de&catalogsource=apps");
+    }
+
+    #[test]
+    fn locale_gb_english() {
+        let locale = Locale::new(Market::Gb, Lang::EnGb, true);
+        let trail = locale.dcat_trail();
+        assert_eq!(trail, "market=GB&languages=en-GB,en&catalogsource=apps");
+    }
+
+    #[test]
+    fn market_as_str_roundtrip() {
+        assert_eq!(Market::Us.as_str(), "US");
+        assert_eq!(Market::Jp.as_str(), "JP");
+        assert_eq!(Market::Zw.as_str(), "ZW");
+    }
+
+    #[test]
+    fn lang_as_str_roundtrip() {
+        assert_eq!(Lang::En.as_str(), "en-US");
+        assert_eq!(Lang::ZhHant.as_str(), "zh-Hant");
+        assert_eq!(Lang::PtBr.as_str(), "pt-BR");
+    }
+}
