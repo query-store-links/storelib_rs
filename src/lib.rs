@@ -26,6 +26,9 @@ pub mod models;
 pub mod services;
 pub mod utilities;
 
+#[cfg(all(feature = "ffi", not(target_arch = "wasm32")))]
+pub mod ffi;
+
 // ---------------------------------------------------------------------------
 // Convenient re-exports at the crate root
 // ---------------------------------------------------------------------------

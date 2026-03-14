@@ -2,7 +2,7 @@ use crate::models::enums::PackageType;
 use serde::{Deserialize, Serialize};
 
 /// A resolved package instance with download URI and update metadata.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct PackageInstance {
     pub package_moniker: String,
     pub package_uri: Option<String>,

@@ -11,7 +11,7 @@ pub enum DCatEndpoint {
 }
 
 /// Package format type returned by the FE3 service.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub enum PackageType {
     Uap,
     Xap,
