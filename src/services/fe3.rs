@@ -193,6 +193,7 @@ impl FE3Handler {
                 package_type: pkg_type,
                 applicability_blob: blob,
                 update_id: String::new(),
+                file_size: None,
             });
         }
 

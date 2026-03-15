@@ -184,9 +184,31 @@ impl DisplayCatalogHandler {
             FE3Handler::get_file_urls(&update_ids, &revision_ids, msa_token, &self.client).await?;
         debug!("FE3: {} download URL(s) resolved", urls.len());
 
+        // Build a moniker → file-size lookup from the DCat catalog packages.
+        // PackageFullName in DCat equals PackageMoniker in FE3.
+        let dcat_size_map: std::collections::HashMap<&str, i64> = product
+            .display_sku_availabilities
+            .as_deref()
+            .iter()
+            .flat_map(|v| v.iter())
+            .flat_map(|dsa| {
+                dsa.sku
+                    .as_ref()
+                    .and_then(|s| s.properties.as_ref())
+                    .and_then(|p| p.packages.as_deref())
+                    .unwrap_or(&[])
+            })
+            .filter_map(|pkg| {
+                let name = pkg.package_full_name.as_deref()?;
+                let size = pkg.max_download_size_in_bytes?;
+                Some((name, size))
+            })
+            .collect();
+
         for (i, instance) in instances.iter_mut().enumerate() {
             instance.package_uri = urls.get(i).cloned();
             instance.update_id = update_ids.get(i).cloned().unwrap_or_default();
+            instance.file_size = dcat_size_map.get(instance.package_moniker.as_str()).copied();
         }
 
         info!("Resolved {} package(s)", instances.len());

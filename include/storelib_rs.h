@@ -147,6 +147,8 @@ char* storelib_product_json(const StorelibHandle* handle);
  *   "package_uri"     : string | null
  *   "package_type"    : "Uap" | "Xap" | "AppX" | "Unknown"
  *   "update_id"       : string
+ *   "file_size"       : number | null  (MaxDownloadSizeInBytes from the catalog; null for
+ *                                       framework dependencies not listed in the catalog SKU)
  *
  * @param handle     A valid handle after a successful storelib_query().
  * @param msa_token  Optional auth token, or NULL.

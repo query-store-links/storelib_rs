@@ -9,6 +9,10 @@ pub struct PackageInstance {
     pub package_type: PackageType,
     pub applicability_blob: Option<ApplicabilityBlob>,
     pub update_id: String,
+    /// Download size in bytes, sourced from the DisplayCatalog `MaxDownloadSizeInBytes` field.
+    /// `None` for framework-dependency packages (e.g. VCLibs) that are not listed in the
+    /// catalog SKU but are still returned by FE3.
+    pub file_size: Option<i64>,
 }
 
 /// Applicability metadata embedded in the FE3 SyncUpdates response.
