@@ -208,7 +208,9 @@ impl DisplayCatalogHandler {
         for (i, instance) in instances.iter_mut().enumerate() {
             instance.package_uri = urls.get(i).cloned();
             instance.update_id = update_ids.get(i).cloned().unwrap_or_default();
-            instance.file_size = dcat_size_map.get(instance.package_moniker.as_str()).copied();
+            instance.file_size = dcat_size_map
+                .get(instance.package_moniker.as_str())
+                .copied();
         }
 
         info!("Resolved {} package(s)", instances.len());
