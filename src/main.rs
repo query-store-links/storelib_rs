@@ -144,6 +144,9 @@ mod cli {
                         log::info!("Found {} package(s):", pkgs.len());
                         for pkg in &pkgs {
                             log::info!("  {} [{:?}]", pkg.package_moniker, pkg.package_type);
+                            if let Some(size) = pkg.file_size {
+                                log::info!("    Size: {size} bytes");
+                            }
                             if let Some(uri) = &pkg.package_uri {
                                 log::info!("    URL: {uri}");
                             }

@@ -206,15 +206,15 @@ impl FE3Handler {
 
     /// For each `(update_id, revision_id)` pair, POST a
     /// `GetExtendedUpdateInfo2` SOAP request to FE3 and collect the resulting
-    /// file URLs (blockmap entries – always length 99 – are filtered out).
+    /// file URLs and sizes (blockmap entries – always length 99 – are filtered out).
     pub async fn get_file_urls(
         update_ids: &[String],
         revision_ids: &[String],
         msa_token: Option<&str>,
         client: &reqwest::Client,
-    ) -> Result<Vec<String>, StoreError> {
+    ) -> Result<Vec<(String, Option<i64>)>, StoreError> {
         let token = msa_token.unwrap_or(MSA_TOKEN);
-        let mut urls = Vec::new();
+        let mut results = Vec::new();
 
         for (i, update_id) in update_ids.iter().enumerate() {
             let revision_id = match revision_ids.get(i) {
@@ -240,7 +240,7 @@ impl FE3Handler {
             debug!("FE3 GetExtendedUpdateInfo2 response: HTTP {status}");
 
             let raw = response.text().await.map_err(StoreError::Http)?;
-            trace!("FE3 GetExtendedUpdateInfo2 body:\n{raw}");
+            debug!("FE3 GetExtendedUpdateInfo2 body:\n{raw}");
 
             let doc = match roxmltree::Document::parse(&raw) {
                 Ok(d) => d,
@@ -251,22 +251,34 @@ impl FE3Handler {
                 if file_loc.tag_name().name() != "FileLocation" {
                     continue;
                 }
+                let mut url_opt: Option<String> = None;
+                let mut size_opt: Option<i64> = None;
                 for child in file_loc.children() {
-                    if child.tag_name().name() == "Url" {
-                        if let Some(text) = child.text() {
-                            if text.len() != 99 {
-                                debug!("FE3: URL resolved: {text}");
-                                urls.push(text.to_owned());
-                            } else {
-                                trace!("FE3: skipping blockmap URL (len=99)");
+                    match child.tag_name().name() {
+                        "Url" => {
+                            if let Some(text) = child.text() {
+                                if text.len() != 99 {
+                                    debug!("FE3: URL resolved: {text}");
+                                    url_opt = Some(text.to_owned());
+                                } else {
+                                    trace!("FE3: skipping blockmap URL (len=99)");
+                                }
                             }
                         }
+                        "FileSize" => {
+                            size_opt = child.text().and_then(|t| t.parse::<i64>().ok());
+                            debug!("FE3: FileSize={size_opt:?}");
+                        }
+                        _ => {}
                     }
+                }
+                if let Some(url) = url_opt {
+                    results.push((url, size_opt));
                 }
             }
         }
 
-        Ok(urls)
+        Ok(results)
     }
 }
 

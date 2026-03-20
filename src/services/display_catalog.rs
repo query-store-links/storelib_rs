@@ -205,12 +205,35 @@ impl DisplayCatalogHandler {
             })
             .collect();
 
+        info!("DCat size map ({} entries):", dcat_size_map.len());
+        for (name, size) in &dcat_size_map {
+            info!("  DCat package: {name} = {size} bytes");
+        }
+        info!("FE3 package monikers ({} entries):", instances.len());
+        for inst in &instances {
+            info!("  FE3 moniker: {}", inst.package_moniker);
+        }
+
         for (i, instance) in instances.iter_mut().enumerate() {
-            instance.package_uri = urls.get(i).cloned();
             instance.update_id = update_ids.get(i).cloned().unwrap_or_default();
-            instance.file_size = dcat_size_map
-                .get(instance.package_moniker.as_str())
-                .copied();
+            if let Some((url, fe3_size)) = urls.get(i) {
+                instance.package_uri = Some(url.clone());
+                instance.file_size = *fe3_size;
+            }
+            // Fall back to DCat size if FE3 didn't provide one
+            if instance.file_size.is_none() {
+                instance.file_size = dcat_size_map
+                    .get(instance.package_moniker.as_str())
+                    .copied();
+            }
+            info!(
+                "  package[{i}]: moniker={} fe3_size={:?} dcat_size={:?}",
+                instance.package_moniker,
+                urls.get(i).and_then(|(_, s)| *s),
+                dcat_size_map
+                    .get(instance.package_moniker.as_str())
+                    .copied(),
+            );
         }
 
         info!("Resolved {} package(s)", instances.len());
