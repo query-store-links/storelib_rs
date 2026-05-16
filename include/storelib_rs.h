@@ -27,7 +27,8 @@ extern "C" {
  * Opaque handle
  * ---------------------------------------------------------------------- */
 
-typedef struct StorelibHandle StorelibHandle;
+typedef struct StorelibHandle       StorelibHandle;
+typedef struct StorelibCancellation StorelibCancellation;
 
 /* -------------------------------------------------------------------------
  * Return / error codes
@@ -178,6 +179,78 @@ char* storelib_packages_json(StorelibHandle* handle, const char* msa_token);
  * The caller MUST free the returned string with storelib_free_string().
  */
 char* storelib_search_json(StorelibHandle* handle, const char* query, uint32_t family);
+
+/* -------------------------------------------------------------------------
+ * Cancellation
+ * ---------------------------------------------------------------------- */
+
+/**
+ * Allocate a fresh, uncancelled cancellation token. Pass it to any
+ * `storelib_*_with_cancel` function to give callers a way to abort a
+ * stalled call. Cancellation may be signalled from any thread.
+ *
+ * Free with storelib_cancellation_free().
+ *
+ * Returns NULL only on allocation failure (extremely unlikely).
+ */
+StorelibCancellation* storelib_cancellation_new(void);
+
+/**
+ * Signal cancellation. Safe to call from any thread (e.g. a watchdog timer
+ * thread while another thread is blocked inside storelib_query_with_cancel).
+ * Idempotent — calling more than once is harmless.
+ *
+ * Passing NULL is a safe no-op.
+ */
+void storelib_cancellation_cancel(const StorelibCancellation* token);
+
+/**
+ * Returns 1 if `token` has been cancelled, 0 otherwise (also 0 if `token`
+ * is NULL).
+ */
+int32_t storelib_cancellation_is_cancelled(const StorelibCancellation* token);
+
+/**
+ * Free a cancellation token. After this call the pointer is invalid.
+ * Passing NULL is a safe no-op.
+ */
+void storelib_cancellation_free(StorelibCancellation* token);
+
+/**
+ * Like storelib_query() but races against `cancel`. Returns
+ * STORELIB_ERR_CANCELLED if the token fires before the request completes.
+ * Pass NULL for `cancel` to disable cancellation.
+ */
+int32_t storelib_query_with_cancel(
+    StorelibHandle*             handle,
+    const char*                 id,
+    uint32_t                    id_type,
+    const char*                 auth_token,
+    const StorelibCancellation* cancel
+);
+
+/**
+ * Like storelib_packages_json() but races against `cancel`. Returns NULL on
+ * error or cancellation; inspect storelib_last_error().
+ * The caller MUST free the returned string with storelib_free_string().
+ */
+char* storelib_packages_json_with_cancel(
+    StorelibHandle*             handle,
+    const char*                 msa_token,
+    const StorelibCancellation* cancel
+);
+
+/**
+ * Like storelib_search_json() but races against `cancel`. Returns NULL on
+ * error or cancellation; inspect storelib_last_error().
+ * The caller MUST free the returned string with storelib_free_string().
+ */
+char* storelib_search_json_with_cancel(
+    StorelibHandle*             handle,
+    const char*                 query,
+    uint32_t                    family,
+    const StorelibCancellation* cancel
+);
 
 /* -------------------------------------------------------------------------
  * Progress reporting

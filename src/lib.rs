@@ -7,6 +7,7 @@
 // Public modules
 // ---------------------------------------------------------------------------
 
+pub mod cancellation;
 pub mod error;
 pub mod models;
 pub mod services;
@@ -24,6 +25,9 @@ pub mod wasm;
 // ---------------------------------------------------------------------------
 // Convenient re-exports at the crate root
 // ---------------------------------------------------------------------------
+
+// cancellation
+pub use cancellation::{CancellationToken, Cancelled};
 
 // error
 pub use error::StoreError;
@@ -47,7 +51,9 @@ pub use models::locale::{Lang, LanguageTag, Locale, Market};
 pub use models::search::{DCatSearch, SearchResult};
 
 // services
-pub use services::display_catalog::{DisplayCatalogHandler, ProgressCallback, ProgressEvent};
+pub use services::display_catalog::{
+    ClientConfig, DisplayCatalogHandler, ProgressCallback, ProgressEvent,
+};
 pub use services::fe3::FE3Handler;
 
 // utilities

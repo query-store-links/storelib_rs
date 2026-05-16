@@ -1,3 +1,9 @@
+use std::future::Future;
+use std::time::Duration;
+
+use futures_util::future::{select, Either};
+
+use crate::cancellation::CancellationToken;
 use crate::error::StoreError;
 use crate::models::catalog::DisplayCatalogModel;
 use crate::models::enums::{DCatEndpoint, DeviceFamily, DisplayCatalogResult, IdentifierType};
@@ -6,7 +12,192 @@ use crate::models::locale::Locale;
 use crate::models::search::DCatSearch;
 use crate::services::fe3::FE3Handler;
 use crate::utilities::helpers::{create_dcat_uri, endpoint_to_search_url};
+use crate::utilities::sleep::sleep;
 use log::{debug, error, info, warn};
+
+// ---------------------------------------------------------------------------
+// HTTP client config
+// ---------------------------------------------------------------------------
+
+/// Tunable HTTP-client parameters shared by [`DisplayCatalogHandler`] and the
+/// FE3 SOAP calls it triggers.
+///
+/// Construct with [`Default`] for the recommended values, or build one
+/// explicitly:
+///
+/// ```
+/// use std::time::Duration;
+/// use storelib_rs::ClientConfig;
+///
+/// let cfg = ClientConfig {
+///     timeout: Duration::from_secs(60),
+///     max_retries: 5,
+///     ..Default::default()
+/// };
+/// ```
+#[derive(Debug, Clone)]
+pub struct ClientConfig {
+    /// Per-request timeout. The whole request (incl. body read) must finish
+    /// inside this window or it fails with [`StoreError::TimedOut`].
+    /// Default: 30 s.
+    pub timeout: Duration,
+    /// Maximum retry attempts on transient failures
+    /// (connection errors, timeouts, statuses in [`Self::retry_on_status`]).
+    /// `0` disables retries. Default: `3`.
+    pub max_retries: u32,
+    /// Initial backoff between attempts; doubled each retry up to
+    /// [`Self::max_backoff`]. Default: 500 ms.
+    pub initial_backoff: Duration,
+    /// Upper cap on per-attempt backoff. Default: 5 s.
+    pub max_backoff: Duration,
+    /// HTTP status codes that trigger a retry. Default:
+    /// `[408, 429, 502, 503, 504]`.
+    pub retry_on_status: Vec<u16>,
+    /// User-Agent header. Default: `"StoreLib"`.
+    pub user_agent: String,
+}
+
+impl Default for ClientConfig {
+    fn default() -> Self {
+        Self {
+            timeout: Duration::from_secs(30),
+            max_retries: 3,
+            initial_backoff: Duration::from_millis(500),
+            max_backoff: Duration::from_secs(5),
+            retry_on_status: vec![408, 429, 502, 503, 504],
+            user_agent: "StoreLib".into(),
+        }
+    }
+}
+
+impl ClientConfig {
+    pub(crate) fn backoff_for(&self, attempt: u32) -> Duration {
+        // attempt 0 → initial; attempt 1 → 2× initial; attempt N → 2^N × initial, capped.
+        let factor: u64 = 1u64.checked_shl(attempt).unwrap_or(u64::MAX);
+        let nanos = self
+            .initial_backoff
+            .as_nanos()
+            .saturating_mul(factor as u128);
+        let dur = Duration::from_nanos(nanos.min(u64::MAX as u128) as u64);
+        std::cmp::min(dur, self.max_backoff)
+    }
+}
+
+/// Race `op` against an optional cancellation token. Returns
+/// [`StoreError::Cancelled`] if the token is cancelled before `op` completes.
+pub(crate) async fn race_cancel<F, T>(
+    op: F,
+    cancel: Option<&CancellationToken>,
+) -> Result<T, StoreError>
+where
+    F: Future<Output = Result<T, StoreError>>,
+{
+    let op = std::pin::pin!(op);
+    match cancel {
+        Some(tok) => {
+            let cancel_fut = tok.cancelled();
+            let cancel_fut = std::pin::pin!(cancel_fut);
+            match select(op, cancel_fut).await {
+                Either::Left((res, _)) => res,
+                Either::Right(_) => Err(StoreError::Cancelled),
+            }
+        }
+        None => op.await,
+    }
+}
+
+/// Send a reqwest request with exponential-backoff retries, optional
+/// cancellation, and progress events on each retry boundary.
+///
+/// `make_req` is called once per attempt — it must rebuild the
+/// [`reqwest::RequestBuilder`] each time because `RequestBuilder` isn't
+/// cloneable. `on_progress` receives `("retry.wait", …)` before each backoff
+/// sleep and `("retry.attempt", …)` after the sleep, just before the next
+/// send.
+///
+/// Returns the [`reqwest::Response`] on success or on the final attempt
+/// (caller inspects status). Returns [`StoreError::Cancelled`] if the token
+/// fires at any point (including mid-backoff). Returns [`StoreError::TimedOut`]
+/// or [`StoreError::Http`] when retries are exhausted on a transport error.
+pub(crate) async fn send_with_retry<F, P>(
+    make_req: F,
+    cfg: &ClientConfig,
+    cancel: Option<&CancellationToken>,
+    on_progress: P,
+) -> Result<reqwest::Response, StoreError>
+where
+    F: Fn() -> reqwest::RequestBuilder,
+    P: Fn(&'static str, String),
+{
+    let total_attempts = cfg.max_retries.saturating_add(1);
+    let mut last_err: Option<StoreError> = None;
+
+    for attempt in 0..total_attempts {
+        if attempt > 0 {
+            let backoff = cfg.backoff_for(attempt - 1);
+            on_progress(
+                "retry.wait",
+                format!(
+                    "waiting {}ms before attempt {}/{}",
+                    backoff.as_millis(),
+                    attempt + 1,
+                    total_attempts,
+                ),
+            );
+            // Cancellation-aware sleep. Returns Cancelled if the token fires.
+            race_cancel(
+                async {
+                    sleep(backoff).await;
+                    Ok::<(), StoreError>(())
+                },
+                cancel,
+            )
+            .await?;
+            on_progress(
+                "retry.attempt",
+                format!("attempt {}/{}", attempt + 1, total_attempts),
+            );
+        }
+
+        let send_fut = make_req().send();
+        let result = race_cancel(
+            async {
+                send_fut.await.map_err(|e| {
+                    if e.is_timeout() {
+                        StoreError::TimedOut
+                    } else {
+                        StoreError::Http(e)
+                    }
+                })
+            },
+            cancel,
+        )
+        .await;
+
+        match result {
+            Ok(resp) => {
+                let status = resp.status().as_u16();
+                let retryable = cfg.retry_on_status.contains(&status);
+                let attempts_left = attempt + 1 < total_attempts;
+                if retryable && attempts_left {
+                    // Drop the response and try again.
+                    continue;
+                }
+                return Ok(resp);
+            }
+            Err(StoreError::Cancelled) => return Err(StoreError::Cancelled),
+            Err(e) => {
+                if attempt + 1 < total_attempts {
+                    last_err = Some(e);
+                    continue;
+                }
+                return Err(e);
+            }
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| StoreError::Other("retries exhausted".into())))
+}
 
 // ---------------------------------------------------------------------------
 // Progress reporting
@@ -51,13 +242,21 @@ pub struct DisplayCatalogHandler {
     pub selected_locale: Locale,
     pub is_found: bool,
     client: reqwest::Client,
+    pub(crate) config: ClientConfig,
     progress: Option<ProgressCallback>,
 }
 
 impl DisplayCatalogHandler {
-    /// Create a new handler pointing at the given endpoint with the given locale.
+    /// Create a new handler pointing at the given endpoint with the given
+    /// locale, using the default [`ClientConfig`].
     pub fn new(endpoint: DCatEndpoint, locale: Locale) -> Self {
-        let client = Self::build_client();
+        Self::with_config(endpoint, locale, ClientConfig::default())
+    }
+
+    /// Create a new handler with explicit [`ClientConfig`] (timeout, retry
+    /// policy, user agent).
+    pub fn with_config(endpoint: DCatEndpoint, locale: Locale, config: ClientConfig) -> Self {
+        let client = Self::build_client(&config);
         DisplayCatalogHandler {
             product_listing: None,
             error: None,
@@ -69,8 +268,14 @@ impl DisplayCatalogHandler {
             selected_locale: locale,
             is_found: false,
             client,
+            config,
             progress: None,
         }
+    }
+
+    /// Returns a reference to the handler's [`ClientConfig`].
+    pub fn config(&self) -> &ClientConfig {
+        &self.config
     }
 
     /// Install a callback that fires at every phase boundary inside
@@ -120,11 +325,14 @@ impl DisplayCatalogHandler {
         Self::new(DCatEndpoint::Production, Locale::production())
     }
 
-    fn build_client() -> reqwest::Client {
-        reqwest::Client::builder()
-            .user_agent("StoreLib")
-            .build()
-            .unwrap_or_default()
+    fn build_client(config: &ClientConfig) -> reqwest::Client {
+        #[cfg(not(target_arch = "wasm32"))]
+        let builder = reqwest::Client::builder()
+            .user_agent(&config.user_agent)
+            .timeout(config.timeout);
+        #[cfg(target_arch = "wasm32")]
+        let builder = reqwest::Client::builder().user_agent(&config.user_agent);
+        builder.build().unwrap_or_default()
     }
 
     // -----------------------------------------------------------------------
@@ -141,6 +349,30 @@ impl DisplayCatalogHandler {
         id_type: IdentifierType,
         auth_token: Option<&str>,
     ) -> Result<(), StoreError> {
+        self.query_dcat_with_cancel(id, id_type, auth_token, None)
+            .await
+    }
+
+    /// Same as [`Self::query_dcat`] but races the request against an optional
+    /// [`CancellationToken`]. When the token is cancelled before the request
+    /// completes, dropping the in-flight future cancels the underlying HTTP
+    /// request and this method returns [`StoreError::Cancelled`].
+    pub async fn query_dcat_with_cancel(
+        &mut self,
+        id: &str,
+        id_type: IdentifierType,
+        auth_token: Option<&str>,
+        cancel: Option<&CancellationToken>,
+    ) -> Result<(), StoreError> {
+        race_cancel(self.query_dcat_inner(id, id_type, auth_token), cancel).await
+    }
+
+    async fn query_dcat_inner(
+        &mut self,
+        id: &str,
+        id_type: IdentifierType,
+        auth_token: Option<&str>,
+    ) -> Result<(), StoreError> {
         self.id = Some(id.to_owned());
         self.result = None;
         self.is_found = false;
@@ -149,21 +381,25 @@ impl DisplayCatalogHandler {
         debug!("DCat query: GET {url}");
         self.emit("dcat.request", format!("GET id={id}"));
 
-        let mut req = self.client.get(&url);
-        if let Some(token) = auth_token {
-            if !token.is_empty() {
-                debug!("DCat query: attaching Authentication header");
-                req = req.header("Authentication", token);
-            }
-        }
-
-        let response = req.send().await.map_err(|e| {
-            if e.is_timeout() {
+        let auth = auth_token.filter(|t| !t.is_empty());
+        let response = send_with_retry(
+            || {
+                let mut r = self.client.get(&url);
+                if let Some(token) = auth {
+                    r = r.header("Authentication", token);
+                }
+                r
+            },
+            &self.config,
+            None,
+            |stage, msg| self.emit(stage, msg),
+        )
+        .await
+        .map_err(|e| {
+            if matches!(e, StoreError::TimedOut) {
                 warn!("DCat query timed out for id={id}");
-                StoreError::TimedOut
-            } else {
-                StoreError::Http(e)
             }
+            e
         })?;
 
         let status = response.status();
@@ -216,6 +452,24 @@ impl DisplayCatalogHandler {
     ///
     /// Requires `query_dcat` to have been called successfully first.
     pub async fn get_packages_for_product(
+        &self,
+        msa_token: Option<&str>,
+    ) -> Result<Vec<PackageInstance>, StoreError> {
+        self.get_packages_for_product_with_cancel(msa_token, None)
+            .await
+    }
+
+    /// Same as [`Self::get_packages_for_product`] but races the FE3 SOAP call
+    /// sequence against an optional [`CancellationToken`].
+    pub async fn get_packages_for_product_with_cancel(
+        &self,
+        msa_token: Option<&str>,
+        cancel: Option<&CancellationToken>,
+    ) -> Result<Vec<PackageInstance>, StoreError> {
+        race_cancel(self.get_packages_for_product_inner(msa_token), cancel).await
+    }
+
+    async fn get_packages_for_product_inner(
         &self,
         msa_token: Option<&str>,
     ) -> Result<Vec<PackageInstance>, StoreError> {
@@ -365,9 +619,47 @@ impl DisplayCatalogHandler {
         self.search_dcat_paged(query, device_family, 0).await
     }
 
+    /// Same as [`Self::search_dcat`] but races against an optional
+    /// [`CancellationToken`].
+    pub async fn search_dcat_with_cancel(
+        &mut self,
+        query: &str,
+        device_family: DeviceFamily,
+        cancel: Option<&CancellationToken>,
+    ) -> Result<DCatSearch, StoreError> {
+        self.search_dcat_paged_with_cancel(query, device_family, 0, cancel)
+            .await
+    }
+
     /// Search DisplayCatalog for the given query string, skipping `skip_count`
     /// results (each page holds up to 100 results).
     pub async fn search_dcat_paged(
+        &mut self,
+        query: &str,
+        device_family: DeviceFamily,
+        skip_count: u32,
+    ) -> Result<DCatSearch, StoreError> {
+        self.search_dcat_paged_with_cancel(query, device_family, skip_count, None)
+            .await
+    }
+
+    /// Same as [`Self::search_dcat_paged`] but races against an optional
+    /// [`CancellationToken`].
+    pub async fn search_dcat_paged_with_cancel(
+        &mut self,
+        query: &str,
+        device_family: DeviceFamily,
+        skip_count: u32,
+        cancel: Option<&CancellationToken>,
+    ) -> Result<DCatSearch, StoreError> {
+        race_cancel(
+            self.search_dcat_paged_inner(query, device_family, skip_count),
+            cancel,
+        )
+        .await
+    }
+
+    async fn search_dcat_paged_inner(
         &mut self,
         query: &str,
         device_family: DeviceFamily,
@@ -387,12 +679,13 @@ impl DisplayCatalogHandler {
         debug!("DCat search: GET {url}");
         self.emit("search.request", format!("\"{query}\""));
 
-        let response = self
-            .client
-            .get(&url)
-            .send()
-            .await
-            .map_err(StoreError::Http)?;
+        let response = send_with_retry(
+            || self.client.get(&url),
+            &self.config,
+            None,
+            |stage, msg| self.emit(stage, msg),
+        )
+        .await?;
 
         let status = response.status();
         debug!("DCat search response: HTTP {status}");
@@ -470,6 +763,290 @@ fn log_json_context(body: &str, col: usize) {
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    // -- ClientConfig --------------------------------------------------------
+
+    #[test]
+    fn client_config_default_matches_docs() {
+        let cfg = ClientConfig::default();
+        assert_eq!(cfg.timeout, Duration::from_secs(30));
+        assert_eq!(cfg.max_retries, 3);
+        assert_eq!(cfg.initial_backoff, Duration::from_millis(500));
+        assert_eq!(cfg.max_backoff, Duration::from_secs(5));
+        assert_eq!(cfg.retry_on_status, vec![408, 429, 502, 503, 504]);
+        assert_eq!(cfg.user_agent, "StoreLib");
+    }
+
+    #[test]
+    fn backoff_for_doubles_until_cap() {
+        let cfg = ClientConfig {
+            initial_backoff: Duration::from_millis(100),
+            max_backoff: Duration::from_millis(800),
+            ..Default::default()
+        };
+        assert_eq!(cfg.backoff_for(0), Duration::from_millis(100));
+        assert_eq!(cfg.backoff_for(1), Duration::from_millis(200));
+        assert_eq!(cfg.backoff_for(2), Duration::from_millis(400));
+        // 800ms is the cap; attempt 3 would be 800ms (cap), attempt 4+ stays at cap.
+        assert_eq!(cfg.backoff_for(3), Duration::from_millis(800));
+        assert_eq!(cfg.backoff_for(4), Duration::from_millis(800));
+        assert_eq!(cfg.backoff_for(50), Duration::from_millis(800));
+    }
+
+    #[test]
+    fn backoff_for_handles_huge_attempt_without_overflow() {
+        let cfg = ClientConfig::default();
+        // Should not panic on overflow.
+        let _ = cfg.backoff_for(64);
+        let _ = cfg.backoff_for(u32::MAX);
+    }
+
+    #[test]
+    fn with_config_keeps_overrides() {
+        let cfg = ClientConfig {
+            user_agent: "TestUA/1.0".into(),
+            max_retries: 7,
+            ..Default::default()
+        };
+        let h = DisplayCatalogHandler::with_config(
+            DCatEndpoint::Production,
+            Locale::production(),
+            cfg.clone(),
+        );
+        assert_eq!(h.config().max_retries, 7);
+        assert_eq!(h.config().user_agent, "TestUA/1.0");
+    }
+
+    // -- race_cancel ---------------------------------------------------------
+
+    #[tokio::test]
+    async fn race_cancel_returns_op_result_when_not_cancelled() {
+        let op = async { Ok::<_, StoreError>(42_u32) };
+        let result = race_cancel(op, None).await.unwrap();
+        assert_eq!(result, 42);
+    }
+
+    #[tokio::test]
+    async fn race_cancel_returns_op_result_when_token_uncancelled() {
+        let token = CancellationToken::new();
+        let op = async { Ok::<_, StoreError>("done") };
+        let result = race_cancel(op, Some(&token)).await.unwrap();
+        assert_eq!(result, "done");
+    }
+
+    #[tokio::test]
+    async fn race_cancel_returns_cancelled_when_token_fires_first() {
+        let token = CancellationToken::new();
+        let canceller = token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            canceller.cancel();
+        });
+        // Op never completes on its own.
+        let op = async {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            Ok::<_, StoreError>(())
+        };
+        let err = race_cancel(op, Some(&token)).await.unwrap_err();
+        assert!(matches!(err, StoreError::Cancelled));
+    }
+
+    #[tokio::test]
+    async fn race_cancel_returns_cancelled_when_token_already_cancelled() {
+        let token = CancellationToken::new();
+        token.cancel();
+        // Op would succeed if allowed to run, but token is already cancelled
+        // so race_cancel resolves immediately on the Right branch.
+        let op = async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            Ok::<_, StoreError>(())
+        };
+        let err = race_cancel(op, Some(&token)).await.unwrap_err();
+        assert!(matches!(err, StoreError::Cancelled));
+    }
+
+    #[tokio::test]
+    async fn race_cancel_propagates_op_error() {
+        let token = CancellationToken::new();
+        let op = async { Err::<u32, _>(StoreError::NotFound) };
+        let err = race_cancel(op, Some(&token)).await.unwrap_err();
+        assert!(matches!(err, StoreError::NotFound));
+    }
+
+    // -- send_with_retry (wiremock-backed) ----------------------------------
+
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn fast_retry_cfg() -> ClientConfig {
+        // Tiny backoffs so tests don't drag.
+        ClientConfig {
+            initial_backoff: Duration::from_millis(1),
+            max_backoff: Duration::from_millis(2),
+            max_retries: 3,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn send_with_retry_succeeds_on_first_attempt() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
+            .expect(1) // exactly one request
+            .mount(&server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let cfg = fast_retry_cfg();
+        let resp = send_with_retry(|| client.get(server.uri()), &cfg, None, |_, _| {})
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn send_with_retry_retries_on_503_then_succeeds() {
+        let server = MockServer::start().await;
+        // First two requests return 503; the third returns 200.
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(503))
+            .up_to_n_times(2)
+            .expect(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let cfg = fast_retry_cfg();
+        let resp = send_with_retry(|| client.get(server.uri()), &cfg, None, |_, _| {})
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn send_with_retry_gives_up_after_max_retries() {
+        let server = MockServer::start().await;
+        // Every request returns 503; expect max_retries + 1 attempts total.
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(503))
+            .expect(4) // 1 initial + 3 retries
+            .mount(&server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let cfg = fast_retry_cfg();
+        let resp = send_with_retry(|| client.get(server.uri()), &cfg, None, |_, _| {})
+            .await
+            .unwrap();
+        // After exhausting retries we return the last response unchanged.
+        assert_eq!(resp.status(), 503);
+    }
+
+    #[tokio::test]
+    async fn send_with_retry_does_not_retry_on_4xx() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1) // 404 is not in retry_on_status by default
+            .mount(&server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let cfg = fast_retry_cfg();
+        let resp = send_with_retry(|| client.get(server.uri()), &cfg, None, |_, _| {})
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404);
+    }
+
+    #[tokio::test]
+    async fn send_with_retry_emits_progress_per_attempt() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(503))
+            .up_to_n_times(2)
+            .expect(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let log_cb = log.clone();
+        let client = reqwest::Client::new();
+        let cfg = fast_retry_cfg();
+        let _ = send_with_retry(
+            || client.get(server.uri()),
+            &cfg,
+            None,
+            |stage, _msg| log_cb.lock().unwrap().push(stage.to_string()),
+        )
+        .await
+        .unwrap();
+
+        let stages = log.lock().unwrap().clone();
+        // Two retries → two (retry.wait, retry.attempt) pairs.
+        assert_eq!(
+            stages,
+            vec![
+                "retry.wait".to_string(),
+                "retry.attempt".to_string(),
+                "retry.wait".to_string(),
+                "retry.attempt".to_string(),
+            ],
+        );
+    }
+
+    #[tokio::test]
+    async fn send_with_retry_cancel_during_backoff_returns_cancelled_fast() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(503))
+            // We expect at most 1 hit: first 503, then we cancel during backoff
+            // so the retry never fires.
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let cfg = ClientConfig {
+            initial_backoff: Duration::from_secs(60),
+            max_backoff: Duration::from_secs(60),
+            max_retries: 3,
+            ..Default::default()
+        };
+
+        let token = CancellationToken::new();
+        let canceller = token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            canceller.cancel();
+        });
+
+        let client = reqwest::Client::new();
+        let started = std::time::Instant::now();
+        let err = send_with_retry(|| client.get(server.uri()), &cfg, Some(&token), |_, _| {})
+            .await
+            .unwrap_err();
+        let elapsed = started.elapsed();
+
+        assert!(matches!(err, StoreError::Cancelled));
+        // Should resolve well under the 60s backoff once the token fires.
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "cancel-during-backoff took too long: {:?}",
+            elapsed,
+        );
+    }
 
     #[test]
     fn progress_event_serializes_camel_case() {

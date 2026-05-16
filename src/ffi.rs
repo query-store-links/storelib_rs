@@ -19,6 +19,7 @@ use std::os::raw::c_char;
 
 use std::ffi::c_void;
 
+use crate::cancellation::CancellationToken;
 use crate::models::enums::{DeviceFamily, IdentifierType};
 use crate::services::display_catalog::{DisplayCatalogHandler, ProgressEvent};
 
@@ -416,6 +417,242 @@ pub unsafe extern "C" fn storelib_clear_progress_callback(handle: *mut StorelibH
     }
     (*handle).handler.clear_progress_callback();
     STORELIB_OK
+}
+
+// ---------------------------------------------------------------------------
+// Cancellation
+// ---------------------------------------------------------------------------
+
+/// Opaque cancellation handle. Create with [`storelib_cancellation_new`], pass
+/// to any `storelib_*_with_cancel` function, and signal cancellation from any
+/// thread with [`storelib_cancellation_cancel`]. Free with
+/// [`storelib_cancellation_free`].
+pub struct StorelibCancellation {
+    token: CancellationToken,
+}
+
+/// Allocate a fresh, uncancelled cancellation token. Returns `NULL` only on
+/// allocation failure (extremely unlikely). Free with
+/// [`storelib_cancellation_free`].
+#[no_mangle]
+pub extern "C" fn storelib_cancellation_new() -> *mut StorelibCancellation {
+    Box::into_raw(Box::new(StorelibCancellation {
+        token: CancellationToken::new(),
+    }))
+}
+
+/// Signal cancellation. Safe to call from any thread (including a thread
+/// other than the one running an in-flight `storelib_*_with_cancel` call).
+/// Idempotent — subsequent calls are no-ops.
+///
+/// # Safety
+/// `token` must be a valid pointer returned by [`storelib_cancellation_new`]
+/// that has not been freed. Passing `NULL` is a safe no-op.
+#[no_mangle]
+pub unsafe extern "C" fn storelib_cancellation_cancel(token: *const StorelibCancellation) {
+    if !token.is_null() {
+        (*token).token.cancel();
+    }
+}
+
+/// Returns `1` if the token has been cancelled, `0` otherwise (or if `token`
+/// is `NULL`).
+///
+/// # Safety
+/// `token` must be a valid pointer or `NULL`.
+#[no_mangle]
+pub unsafe extern "C" fn storelib_cancellation_is_cancelled(
+    token: *const StorelibCancellation,
+) -> i32 {
+    if token.is_null() {
+        return 0;
+    }
+    if (*token).token.is_cancelled() {
+        1
+    } else {
+        0
+    }
+}
+
+/// Free a cancellation token. After this call the pointer is invalid.
+///
+/// # Safety
+/// `token` must be a pointer returned by [`storelib_cancellation_new`] that
+/// has not already been freed. Passing `NULL` is a safe no-op.
+#[no_mangle]
+pub unsafe extern "C" fn storelib_cancellation_free(token: *mut StorelibCancellation) {
+    if !token.is_null() {
+        drop(Box::from_raw(token));
+    }
+}
+
+/// Like [`storelib_query`] but races against a cancellation token. Pass `NULL`
+/// for `cancel` to disable cancellation (equivalent to `storelib_query`).
+/// On cancellation the call returns [`STORELIB_ERR_CANCELLED`] and the
+/// underlying HTTP request is dropped.
+///
+/// # Safety
+/// `handle` and `id` must be valid non-null pointers; `auth_token` and
+/// `cancel` may be null.
+#[no_mangle]
+pub unsafe extern "C" fn storelib_query_with_cancel(
+    handle: *mut StorelibHandle,
+    id: *const c_char,
+    id_type: u32,
+    auth_token: *const c_char,
+    cancel: *const StorelibCancellation,
+) -> i32 {
+    if handle.is_null() || id.is_null() {
+        return STORELIB_ERR_NULL;
+    }
+    let h = &mut *handle;
+    h.clear_error();
+
+    let id_str = match CStr::from_ptr(id).to_str() {
+        Ok(s) => s,
+        Err(_) => {
+            h.set_error("id is not valid UTF-8");
+            return STORELIB_ERR_NULL;
+        }
+    };
+
+    let token: Option<&str> = if auth_token.is_null() {
+        None
+    } else {
+        match CStr::from_ptr(auth_token).to_str() {
+            Ok(s) => Some(s),
+            Err(_) => {
+                h.set_error("auth_token is not valid UTF-8");
+                return STORELIB_ERR_NULL;
+            }
+        }
+    };
+
+    let id_enum = id_type_from_u32(id_type);
+    let cancel_ref = if cancel.is_null() {
+        None
+    } else {
+        Some(&(*cancel).token)
+    };
+
+    match h.rt.block_on(
+        h.handler
+            .query_dcat_with_cancel(id_str, id_enum, token, cancel_ref),
+    ) {
+        Ok(_) => STORELIB_OK,
+        Err(e) => {
+            let code = err_code(&e);
+            h.set_error(&e.to_string());
+            code
+        }
+    }
+}
+
+/// Like [`storelib_packages_json`] but races against a cancellation token.
+/// Pass `NULL` for `cancel` to disable cancellation. Returns `NULL` on error
+/// or cancellation; inspect [`storelib_last_error`] for details.
+///
+/// # Safety
+/// `handle` must be a valid non-null pointer; `msa_token` and `cancel` may
+/// be null.
+#[no_mangle]
+pub unsafe extern "C" fn storelib_packages_json_with_cancel(
+    handle: *mut StorelibHandle,
+    msa_token: *const c_char,
+    cancel: *const StorelibCancellation,
+) -> *mut c_char {
+    if handle.is_null() {
+        return std::ptr::null_mut();
+    }
+    let h = &mut *handle;
+    h.clear_error();
+
+    let token: Option<&str> = if msa_token.is_null() {
+        None
+    } else {
+        match CStr::from_ptr(msa_token).to_str() {
+            Ok(s) => Some(s),
+            Err(_) => {
+                h.set_error("msa_token is not valid UTF-8");
+                return std::ptr::null_mut();
+            }
+        }
+    };
+
+    let cancel_ref = if cancel.is_null() {
+        None
+    } else {
+        Some(&(*cancel).token)
+    };
+
+    match h.rt.block_on(
+        h.handler
+            .get_packages_for_product_with_cancel(token, cancel_ref),
+    ) {
+        Ok(pkgs) => match serde_json::to_string(&pkgs) {
+            Ok(json) => cstring_into_raw(json),
+            Err(e) => {
+                h.set_error(&e.to_string());
+                std::ptr::null_mut()
+            }
+        },
+        Err(e) => {
+            h.set_error(&e.to_string());
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// Like [`storelib_search_json`] but races against a cancellation token.
+/// Pass `NULL` for `cancel` to disable cancellation. Returns `NULL` on error
+/// or cancellation; inspect [`storelib_last_error`] for details.
+///
+/// # Safety
+/// `handle` and `query` must be valid non-null pointers; `cancel` may be null.
+#[no_mangle]
+pub unsafe extern "C" fn storelib_search_json_with_cancel(
+    handle: *mut StorelibHandle,
+    query: *const c_char,
+    family: u32,
+    cancel: *const StorelibCancellation,
+) -> *mut c_char {
+    if handle.is_null() || query.is_null() {
+        return std::ptr::null_mut();
+    }
+    let h = &mut *handle;
+    h.clear_error();
+
+    let query_str = match CStr::from_ptr(query).to_str() {
+        Ok(s) => s,
+        Err(_) => {
+            h.set_error("query is not valid UTF-8");
+            return std::ptr::null_mut();
+        }
+    };
+
+    let fam = family_from_u32(family);
+    let cancel_ref = if cancel.is_null() {
+        None
+    } else {
+        Some(&(*cancel).token)
+    };
+
+    match h.rt.block_on(
+        h.handler
+            .search_dcat_with_cancel(query_str, fam, cancel_ref),
+    ) {
+        Ok(results) => match serde_json::to_string(&results) {
+            Ok(json) => cstring_into_raw(json),
+            Err(e) => {
+                h.set_error(&e.to_string());
+                std::ptr::null_mut()
+            }
+        },
+        Err(e) => {
+            h.set_error(&e.to_string());
+            std::ptr::null_mut()
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

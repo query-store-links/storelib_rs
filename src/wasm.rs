@@ -6,16 +6,13 @@
 //! and complex values cross the FFI boundary as plain JS objects via
 //! `serde-wasm-bindgen`.
 
-use std::future::Future;
-use std::pin::Pin;
 use std::str::FromStr;
 
-use futures::channel::oneshot;
-use futures::future::{select, Either};
 use js_sys::{Function, Reflect};
 use serde_wasm_bindgen::{from_value, to_value};
 use wasm_bindgen::prelude::*;
 
+use crate::cancellation::CancellationToken;
 use crate::error::StoreError;
 use crate::models::enums::{DCatEndpoint, DeviceFamily, IdentifierType};
 use crate::models::locale::{Lang, LanguageTag, Locale, Market};
@@ -84,35 +81,38 @@ fn store_err(e: StoreError) -> JsValue {
 }
 
 // ---------------------------------------------------------------------------
-// AbortSignal bridge
+// AbortSignal → CancellationToken bridge
 // ---------------------------------------------------------------------------
 
-/// Holds a oneshot receiver fed by a JS `AbortSignal.addEventListener('abort')`
-/// callback, plus the closure itself so the listener stays alive until the
-/// binding is dropped.
-struct AbortBinding {
-    rx: oneshot::Receiver<()>,
+/// Adapter that mirrors a JS `AbortSignal` into a [`CancellationToken`].
+///
+/// The closure that fires on the `abort` event is owned by this adapter,
+/// so the adapter must outlive the operation it cancels. The token can be
+/// cheaply cloned and handed to service-level `_with_cancel` methods.
+struct AbortAdapter {
+    token: CancellationToken,
     _closure: Option<Closure<dyn FnMut(JsValue)>>,
 }
 
-impl AbortBinding {
+impl AbortAdapter {
     fn from_signal(signal: &JsValue) -> Result<Self, JsError> {
-        let (tx, rx) = oneshot::channel::<()>();
+        let token = CancellationToken::new();
 
-        // If the signal is already aborted, short-circuit by firing the channel.
+        // If the signal is already aborted, propagate immediately.
         let already_aborted = Reflect::get(signal, &JsValue::from_str("aborted"))
             .map(|v| v.as_bool().unwrap_or(false))
             .unwrap_or(false);
         if already_aborted {
-            let _ = tx.send(());
-            return Ok(AbortBinding { rx, _closure: None });
+            token.cancel();
+            return Ok(AbortAdapter {
+                token,
+                _closure: None,
+            });
         }
 
-        let mut tx_opt = Some(tx);
+        let token_for_closure = token.clone();
         let closure = Closure::wrap(Box::new(move |_: JsValue| {
-            if let Some(tx) = tx_opt.take() {
-                let _ = tx.send(());
-            }
+            token_for_closure.cancel();
         }) as Box<dyn FnMut(JsValue)>);
 
         let add: Function = Reflect::get(signal, &JsValue::from_str("addEventListener"))
@@ -126,38 +126,24 @@ impl AbortBinding {
         )
         .map_err(|_| JsError::new("failed to attach abort listener"))?;
 
-        Ok(AbortBinding {
-            rx,
+        Ok(AbortAdapter {
+            token,
             _closure: Some(closure),
         })
     }
 }
 
-impl Future for AbortBinding {
-    type Output = ();
-    fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<()> {
-        Pin::new(&mut self.rx).poll(cx).map(|_| ())
-    }
-}
-
-/// Race `op` against an optional `signal`. Returns `StoreError::Cancelled` if
-/// the signal fires first.
-async fn race_cancel<F, T>(op: F, signal: Option<JsValue>) -> Result<T, StoreError>
-where
-    F: Future<Output = Result<T, StoreError>>,
-{
-    let op = std::pin::pin!(op);
+/// Adapt an optional JS `AbortSignal` into an optional [`AbortAdapter`]. The
+/// returned adapter must be held by the caller for the duration of the
+/// operation it cancels.
+fn adapt_signal(signal: &Option<JsValue>) -> Result<Option<AbortAdapter>, JsValue> {
     match signal {
-        Some(sig) => {
-            let abort = AbortBinding::from_signal(&sig)
-                .map_err(|e| StoreError::Other(format!("invalid AbortSignal: {e:?}")))?;
-            let abort = std::pin::pin!(abort);
-            match select(op, abort).await {
-                Either::Left((res, _)) => res,
-                Either::Right(_) => Err(StoreError::Cancelled),
-            }
+        Some(sig) if !sig.is_null() && !sig.is_undefined() => {
+            let adapter = AbortAdapter::from_signal(sig)
+                .map_err(|e| store_err(StoreError::Other(format!("invalid AbortSignal: {e:?}"))))?;
+            Ok(Some(adapter))
         }
-        None => op.await,
+        _ => Ok(None),
     }
 }
 
@@ -171,6 +157,176 @@ where
 pub fn wasm_init() {
     console_error_panic_hook::set_once();
 }
+
+// ---------------------------------------------------------------------------
+// TypeScript declarations
+// ---------------------------------------------------------------------------
+//
+// These are emitted verbatim into the generated `.d.ts`, so JS consumers see
+// real types (not `any`) for the values that cross the wasm-bindgen boundary.
+
+#[wasm_bindgen(typescript_custom_section)]
+const TS_APPEND_CONTENT: &'static str = r#"
+
+/** Two-letter ISO 3166-1 alpha-2 market code (e.g. "US", "JP"). */
+export type MarketCode = string;
+
+/** Two-letter ISO 639-1 language code (e.g. "en", "zh"). */
+export type LanguageCode = string;
+
+/** Microsoft Store BCP-47 language tag (e.g. "en-US", "zh-Hant-TW"). */
+export type LanguageTagCode = string;
+
+/** A code/name pair returned by `listMarkets`, `listLanguages`,
+ *  `listLanguageTags`, and the `parse*` validators. */
+export interface CodeEntry {
+    code: string;
+    englishName: string;
+}
+
+/** Locale JSON shape (also accepted as input by `createDcatUri`). */
+export interface LocaleJson {
+    market: MarketCode;
+    language: LanguageCode;
+    includeNeutral: boolean;
+}
+
+/** Identifier type accepted by `queryDcat`. `parseIdentifierType` will
+ *  canonicalise any common casing into this exact form. */
+export type IdentifierTypeStr =
+    | "productId"
+    | "xboxTitleId"
+    | "packageFamilyName"
+    | "contentId"
+    | "legacyWindowsPhoneProductId"
+    | "legacyWindowsStoreProductId"
+    | "legacyXboxProductId";
+
+/** Microsoft Store DisplayCatalog endpoint identifier. */
+export type DCatEndpointStr =
+    | "production" | "int" | "xbox" | "xboxInt" | "dev" | "oneP" | "onePInt";
+
+/** Device family used for search filtering. */
+export type DeviceFamilyStr =
+    | "desktop" | "mobile" | "xbox" | "serverCore" | "iotCore"
+    | "holoLens" | "andromeda" | "universal" | "wcos";
+
+/** Package format type returned by FE3. */
+export type PackageTypeStr = "uap" | "xap" | "appX" | "unknown";
+
+/** Image purpose / role inside `Product.localizedProperties[].images`. */
+export type ImagePurposeStr =
+    | "logo" | "tile" | "screenshot" | "boxArt" | "brandedKeyArt"
+    | "poster" | "featurePromotionalSquareArt" | "imageGallery"
+    | "superHeroArt" | "titledHeroArt";
+
+/** Top-level Product kind. */
+export type ProductKindStr =
+    | "game" | "application" | "book" | "movie" | "physical" | "software";
+
+/** Per-platform applicability slice inside an `ApplicabilityBlob`. */
+export interface ContentTargetPlatform {
+    "platform.maxVersionTested"?: number | null;
+    "platform.minVersion"?: number | null;
+    "platform.target"?: number | null;
+}
+
+/** FE3 applicability metadata. Keys are passed through verbatim from the
+ *  SOAP payload, including the dot-separated names. */
+export interface ApplicabilityBlob {
+    "blob.version"?: number | null;
+    "content.isMain"?: boolean | null;
+    "content.packageId"?: string | null;
+    "content.productId"?: string | null;
+    "content.targetPlatforms"?: ContentTargetPlatform[] | null;
+    "content.type"?: number | null;
+}
+
+/** A resolved package instance returned by `getPackagesForProduct`. */
+export interface PackageInstance {
+    packageMoniker: string;
+    packageUri: string | null;
+    packageType: PackageTypeStr;
+    applicabilityBlob: ApplicabilityBlob | null;
+    updateId: string;
+    /** Download size in bytes. FE3-reported first, falling back to the
+     *  DisplayCatalog `MaxDownloadSizeInBytes` field. `null` only for
+     *  framework packages that DCat doesn't list a size for. */
+    packageSize: number | null;
+}
+
+/** Stage identifier passed to `onProgress`. Stable across releases. */
+export type ProgressStage =
+    | "dcat.request" | "dcat.response" | "dcat.parse" | "dcat.done" | "dcat.notFound"
+    | "fe3.start" | "fe3.getCookie" | "fe3.syncUpdates"
+    | "fe3.parseUpdateIds" | "fe3.parseUpdateIds.done"
+    | "fe3.parsePackages" | "fe3.parsePackages.done"
+    | "fe3.resolveUrls" | "fe3.resolveUrls.done" | "fe3.done"
+    | "search.request" | "search.response" | "search.parse" | "search.done"
+    | "retry.wait" | "retry.attempt";
+
+/** Progress event emitted during long-running operations. */
+export interface ProgressEvent {
+    stage: ProgressStage;
+    message: string;
+    /** "N of M" counter — set on `.done` stages, null otherwise. */
+    current: number | null;
+    total: number | null;
+}
+
+/** Progress callback installed via `DisplayCatalogHandler.onProgress`. */
+export type OnProgress = (event: ProgressEvent) => void;
+
+/** Error thrown by async handler methods. Branch on `.kind` to decide
+ *  what to surface to the user. */
+export interface StorelibError extends Error {
+    kind:
+        | "http" | "json" | "xml" | "notFound"
+        | "timedOut" | "cancelled" | "other";
+}
+
+/** Top-level DisplayCatalog response. The MS Store schema is large and
+ *  loosely typed; consumers typically access well-known fields directly.
+ *  This stub keeps the basic shape navigable in TypeScript without
+ *  pretending to fully model every field. */
+export interface DisplayCatalogModel {
+    product?: ProductLike | null;
+    products?: ProductLike[] | null;
+    bigIds?: string[] | null;
+    hasMorePages?: boolean | null;
+    totalResultCount?: number | null;
+}
+
+/** Loosely-typed Product shape. Camel-cased throughout. */
+export interface ProductLike {
+    lastModifiedDate?: string | null;
+    localizedProperties?: ProductLocalizedPropertyLike[] | null;
+    properties?: { [k: string]: any } | null;
+    displaySkuAvailabilities?: { [k: string]: any }[] | null;
+    productKind?: ProductKindStr | string | null;
+    [key: string]: any;
+}
+
+export interface ProductLocalizedPropertyLike {
+    productTitle?: string | null;
+    productDescription?: string | null;
+    publisherName?: string | null;
+    language?: string | null;
+    images?: { [k: string]: any }[] | null;
+    [key: string]: any;
+}
+
+/** DCat search response. */
+export interface DCatSearch {
+    results?: SearchResult[] | null;
+    totalResultCount?: number | null;
+}
+
+export interface SearchResult {
+    productFamilyName?: string | null;
+    products?: ProductLike[] | null;
+}
+"#;
 
 // ---------------------------------------------------------------------------
 // Free helper functions
@@ -205,7 +361,7 @@ struct CodeEntry {
 }
 
 /// Returns every ISO 3166-1 alpha-2 market code with its English name.
-#[wasm_bindgen(js_name = listMarkets)]
+#[wasm_bindgen(js_name = listMarkets, unchecked_return_type = "CodeEntry[]")]
 pub fn list_markets_js() -> Result<JsValue, JsError> {
     let entries: Vec<CodeEntry> = Market::all()
         .iter()
@@ -218,7 +374,7 @@ pub fn list_markets_js() -> Result<JsValue, JsError> {
 }
 
 /// Returns every ISO 639-1 alpha-2 language code with its English name.
-#[wasm_bindgen(js_name = listLanguages)]
+#[wasm_bindgen(js_name = listLanguages, unchecked_return_type = "CodeEntry[]")]
 pub fn list_languages_js() -> Result<JsValue, JsError> {
     let entries: Vec<CodeEntry> = Lang::all()
         .iter()
@@ -232,7 +388,7 @@ pub fn list_languages_js() -> Result<JsValue, JsError> {
 
 /// Returns every Microsoft Store BCP-47 language tag (e.g. `en-US`,
 /// `zh-Hant`, `sr-Cyrl-RS`) with its English name.
-#[wasm_bindgen(js_name = listLanguageTags)]
+#[wasm_bindgen(js_name = listLanguageTags, unchecked_return_type = "CodeEntry[]")]
 pub fn list_language_tags_js() -> Result<JsValue, JsError> {
     let entries: Vec<CodeEntry> = LanguageTag::all()
         .iter()
@@ -246,7 +402,7 @@ pub fn list_language_tags_js() -> Result<JsValue, JsError> {
 
 /// Validate a market code and return its canonical form + English name.
 /// Throws when the code isn't a known ISO 3166-1 alpha-2 market.
-#[wasm_bindgen(js_name = parseMarket)]
+#[wasm_bindgen(js_name = parseMarket, unchecked_return_type = "CodeEntry")]
 pub fn parse_market_js(code: &str) -> Result<JsValue, JsError> {
     let m = parse_market(code)?;
     to_value(&CodeEntry {
@@ -258,7 +414,7 @@ pub fn parse_market_js(code: &str) -> Result<JsValue, JsError> {
 
 /// Validate a language code and return its canonical form + English name.
 /// Throws when the code isn't a known ISO 639-1 alpha-2 language.
-#[wasm_bindgen(js_name = parseLanguage)]
+#[wasm_bindgen(js_name = parseLanguage, unchecked_return_type = "CodeEntry")]
 pub fn parse_language_js(code: &str) -> Result<JsValue, JsError> {
     let l = parse_lang(code)?;
     to_value(&CodeEntry {
@@ -271,7 +427,7 @@ pub fn parse_language_js(code: &str) -> Result<JsValue, JsError> {
 /// Validate a BCP-47 language tag against the Microsoft Store list and return
 /// its canonical form (e.g. `"en-us"` → `"en-US"`) + English name. Throws
 /// when the tag isn't accepted by the Store.
-#[wasm_bindgen(js_name = parseLanguageTag)]
+#[wasm_bindgen(js_name = parseLanguageTag, unchecked_return_type = "CodeEntry")]
 pub fn parse_language_tag_js(tag: &str) -> Result<JsValue, JsError> {
     let t = LanguageTag::from_str(tag).map_err(|e| JsError::new(&e))?;
     to_value(&CodeEntry {
@@ -284,7 +440,7 @@ pub fn parse_language_tag_js(tag: &str) -> Result<JsValue, JsError> {
 /// Validate an identifier-type string in any reasonable casing
 /// (`ProductId`, `productId`, `product-id`, `PRODUCT_ID`) and return the
 /// canonical camelCase form used by `queryDcat`. Throws on unknown values.
-#[wasm_bindgen(js_name = parseIdentifierType)]
+#[wasm_bindgen(js_name = parseIdentifierType, unchecked_return_type = "IdentifierTypeStr")]
 pub fn parse_identifier_type_js(raw: &str) -> Result<String, JsError> {
     let it = IdentifierType::parse_tolerant(raw)
         .ok_or_else(|| JsError::new(&format!("unknown identifierType: {raw}")))?;
@@ -321,7 +477,11 @@ impl LocaleJs {
     /// When `includeNeutral` is true, the neutral English language is appended
     /// to the language list.
     #[wasm_bindgen(constructor)]
-    pub fn new(market: &str, language: &str, include_neutral: bool) -> Result<LocaleJs, JsError> {
+    pub fn new(
+        #[wasm_bindgen(unchecked_param_type = "MarketCode")] market: &str,
+        #[wasm_bindgen(unchecked_param_type = "LanguageCode")] language: &str,
+        include_neutral: bool,
+    ) -> Result<LocaleJs, JsError> {
         Ok(LocaleJs {
             inner: Locale::new(
                 parse_market(market)?,
@@ -344,7 +504,10 @@ impl LocaleJs {
     /// no region (`zh-Hant`, `en-053`), or its primary subtag is not
     /// ISO 639-1 (`chr-Cher-US`).
     #[wasm_bindgen(js_name = fromTag)]
-    pub fn from_tag(tag: &str, include_neutral: bool) -> Result<LocaleJs, JsError> {
+    pub fn from_tag(
+        #[wasm_bindgen(unchecked_param_type = "LanguageTagCode")] tag: &str,
+        include_neutral: bool,
+    ) -> Result<LocaleJs, JsError> {
         let parsed = LanguageTag::from_str(tag).map_err(|e| JsError::new(&e))?;
         let inner = Locale::from_tag(parsed, include_neutral).map_err(JsError::new)?;
         Ok(LocaleJs { inner })
@@ -373,7 +536,7 @@ impl LocaleJs {
     }
 
     /// Returns the locale as a plain object: `{market, language, includeNeutral}`.
-    #[wasm_bindgen(js_name = toJSON)]
+    #[wasm_bindgen(js_name = toJSON, unchecked_return_type = "LocaleJson")]
     pub fn to_json(&self) -> Result<JsValue, JsError> {
         to_value(&self.inner).map_err(js_err)
     }
@@ -423,8 +586,12 @@ impl DisplayCatalogHandlerJs {
     ///   `fe3.parsePackages`, `fe3.parsePackages.done`,
     ///   `fe3.resolveUrls`, `fe3.resolveUrls.done`, `fe3.done`
     /// - `search.request`, `search.response`, `search.parse`, `search.done`
+    /// - `retry.wait`, `retry.attempt`
     #[wasm_bindgen(js_name = onProgress)]
-    pub fn on_progress(&mut self, callback: JsValue) {
+    pub fn on_progress(
+        &mut self,
+        #[wasm_bindgen(unchecked_param_type = "OnProgress | null")] callback: JsValue,
+    ) {
         if callback.is_null() || callback.is_undefined() {
             self.inner.clear_progress_callback();
             return;
@@ -444,16 +611,22 @@ impl DisplayCatalogHandlerJs {
     /// full product listing on success. An optional `authToken` may be provided
     /// for flighted/sandbox queries. Pass an `AbortSignal` to cancel a stalled
     /// request — rejection becomes `"Operation cancelled"`.
-    #[wasm_bindgen(js_name = queryDcat)]
+    #[wasm_bindgen(
+        js_name = queryDcat,
+        unchecked_return_type = "DisplayCatalogModel | null"
+    )]
     pub async fn query_dcat(
         &mut self,
         id: String,
-        id_type: String,
+        #[wasm_bindgen(unchecked_param_type = "IdentifierTypeStr | string")] id_type: String,
         auth_token: Option<String>,
-        signal: Option<JsValue>,
+        #[wasm_bindgen(unchecked_param_type = "AbortSignal | null")] signal: Option<JsValue>,
     ) -> Result<JsValue, JsValue> {
         let t = parse_id_type(&id_type)?;
-        race_cancel(self.inner.query_dcat(&id, t, auth_token.as_deref()), signal)
+        let adapter = adapt_signal(&signal)?;
+        let cancel = adapter.as_ref().map(|a| &a.token);
+        self.inner
+            .query_dcat_with_cancel(&id, t, auth_token.as_deref(), cancel)
             .await
             .map_err(store_err)?;
         Ok(to_value(&self.inner.product_listing).map_err(js_err)?)
@@ -467,32 +640,43 @@ impl DisplayCatalogHandlerJs {
     /// HEAD request on `packageUri`. It's `null` only for framework packages
     /// that DCat doesn't list a size for. Pass an `AbortSignal` to cancel
     /// stalled FE3 SOAP calls.
-    #[wasm_bindgen(js_name = getPackagesForProduct)]
+    #[wasm_bindgen(
+        js_name = getPackagesForProduct,
+        unchecked_return_type = "PackageInstance[]"
+    )]
     pub async fn get_packages_for_product(
         &self,
         msa_token: Option<String>,
-        signal: Option<JsValue>,
+        #[wasm_bindgen(unchecked_param_type = "AbortSignal | null")] signal: Option<JsValue>,
     ) -> Result<JsValue, JsValue> {
-        let packages = race_cancel(
-            self.inner.get_packages_for_product(msa_token.as_deref()),
-            signal,
-        )
-        .await
-        .map_err(store_err)?;
+        let adapter = adapt_signal(&signal)?;
+        let cancel = adapter.as_ref().map(|a| &a.token);
+        let packages = self
+            .inner
+            .get_packages_for_product_with_cancel(msa_token.as_deref(), cancel)
+            .await
+            .map_err(store_err)?;
         Ok(to_value(&packages).map_err(js_err)?)
     }
 
-    /// Search DisplayCatalog for the given query string.
-    #[wasm_bindgen(js_name = searchDcat)]
+    /// Search DisplayCatalog for the given query string. Pass an `AbortSignal`
+    /// to cancel a stalled request.
+    #[wasm_bindgen(
+        js_name = searchDcat,
+        unchecked_return_type = "DCatSearch"
+    )]
     pub async fn search_dcat(
         &mut self,
         query: String,
-        device_family: String,
+        #[wasm_bindgen(unchecked_param_type = "DeviceFamilyStr | string")] device_family: String,
+        #[wasm_bindgen(unchecked_param_type = "AbortSignal | null")] signal: Option<JsValue>,
     ) -> Result<JsValue, JsValue> {
         let df = parse_device_family(&device_family)?;
+        let adapter = adapt_signal(&signal)?;
+        let cancel = adapter.as_ref().map(|a| &a.token);
         let result = self
             .inner
-            .search_dcat(&query, df)
+            .search_dcat_with_cancel(&query, df, cancel)
             .await
             .map_err(store_err)?;
         Ok(to_value(&result).map_err(js_err)?)
@@ -500,17 +684,23 @@ impl DisplayCatalogHandlerJs {
 
     /// Same as `searchDcat` but skips the first `skipCount` results (pages of
     /// up to 100 items each).
-    #[wasm_bindgen(js_name = searchDcatPaged)]
+    #[wasm_bindgen(
+        js_name = searchDcatPaged,
+        unchecked_return_type = "DCatSearch"
+    )]
     pub async fn search_dcat_paged(
         &mut self,
         query: String,
-        device_family: String,
+        #[wasm_bindgen(unchecked_param_type = "DeviceFamilyStr | string")] device_family: String,
         skip_count: u32,
+        #[wasm_bindgen(unchecked_param_type = "AbortSignal | null")] signal: Option<JsValue>,
     ) -> Result<JsValue, JsValue> {
         let df = parse_device_family(&device_family)?;
+        let adapter = adapt_signal(&signal)?;
+        let cancel = adapter.as_ref().map(|a| &a.token);
         let result = self
             .inner
-            .search_dcat_paged(&query, df, skip_count)
+            .search_dcat_paged_with_cancel(&query, df, skip_count, cancel)
             .await
             .map_err(store_err)?;
         Ok(to_value(&result).map_err(js_err)?)
@@ -523,22 +713,22 @@ impl DisplayCatalogHandlerJs {
         self.inner.is_found
     }
 
-    #[wasm_bindgen(getter, js_name = productListing)]
+    #[wasm_bindgen(getter, js_name = productListing, unchecked_return_type = "DisplayCatalogModel | null")]
     pub fn product_listing(&self) -> Result<JsValue, JsError> {
         to_value(&self.inner.product_listing).map_err(js_err)
     }
 
-    #[wasm_bindgen(getter, js_name = searchResult)]
+    #[wasm_bindgen(getter, js_name = searchResult, unchecked_return_type = "DCatSearch | null")]
     pub fn search_result(&self) -> Result<JsValue, JsError> {
         to_value(&self.inner.search_result).map_err(js_err)
     }
 
-    #[wasm_bindgen(getter, js_name = selectedEndpoint)]
+    #[wasm_bindgen(getter, js_name = selectedEndpoint, unchecked_return_type = "DCatEndpointStr")]
     pub fn selected_endpoint(&self) -> Result<JsValue, JsError> {
         to_value(&self.inner.selected_endpoint).map_err(js_err)
     }
 
-    #[wasm_bindgen(getter, js_name = selectedLocale)]
+    #[wasm_bindgen(getter, js_name = selectedLocale, unchecked_return_type = "LocaleJson")]
     pub fn selected_locale(&self) -> Result<JsValue, JsError> {
         to_value(&self.inner.selected_locale).map_err(js_err)
     }
