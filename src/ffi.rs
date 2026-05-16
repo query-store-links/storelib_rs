@@ -230,6 +230,237 @@ pub unsafe extern "C" fn storelib_product_json(handle: *const StorelibHandle) ->
 }
 
 // ---------------------------------------------------------------------------
+// Typed accessors
+// ---------------------------------------------------------------------------
+
+/// Return the first product's title (UTF-8, NUL-terminated) or `NULL` if
+/// the listing has no localized properties / no title.
+///
+/// The caller **must** free the returned string with [`storelib_free_string`].
+///
+/// # Safety
+/// `handle` must be a valid non-null pointer.
+#[no_mangle]
+pub unsafe extern "C" fn storelib_product_title(
+    handle: *const StorelibHandle,
+) -> *mut c_char {
+    if handle.is_null() {
+        return std::ptr::null_mut();
+    }
+    match (*handle).handler.title() {
+        Some(s) => cstring_into_raw(s.to_owned()),
+        None => std::ptr::null_mut(),
+    }
+}
+
+/// Return the first product's publisher name, or `NULL`.
+/// Caller frees with [`storelib_free_string`].
+///
+/// # Safety
+/// `handle` must be a valid non-null pointer.
+#[no_mangle]
+pub unsafe extern "C" fn storelib_product_publisher(
+    handle: *const StorelibHandle,
+) -> *mut c_char {
+    if handle.is_null() {
+        return std::ptr::null_mut();
+    }
+    match (*handle).handler.publisher_name() {
+        Some(s) => cstring_into_raw(s.to_owned()),
+        None => std::ptr::null_mut(),
+    }
+}
+
+/// Return the first price as a JSON string
+/// (`{currencyCode, isPIRequired, listPrice, msrp, ...}`), or `NULL` if
+/// none is listed.
+/// Caller frees with [`storelib_free_string`].
+///
+/// # Safety
+/// `handle` must be a valid non-null pointer.
+#[no_mangle]
+pub unsafe extern "C" fn storelib_price_json(
+    handle: *const StorelibHandle,
+) -> *mut c_char {
+    if handle.is_null() {
+        return std::ptr::null_mut();
+    }
+    match (*handle).handler.price() {
+        Some(price) => match serde_json::to_string(price) {
+            Ok(json) => cstring_into_raw(json),
+            Err(_) => std::ptr::null_mut(),
+        },
+        None => std::ptr::null_mut(),
+    }
+}
+
+/// Return all `Package` entries from the first SKU as a JSON array, or
+/// `NULL` if none are listed. Caller frees with [`storelib_free_string`].
+///
+/// # Safety
+/// `handle` must be a valid non-null pointer.
+#[no_mangle]
+pub unsafe extern "C" fn storelib_packages_listed_json(
+    handle: *const StorelibHandle,
+) -> *mut c_char {
+    if handle.is_null() {
+        return std::ptr::null_mut();
+    }
+    match serde_json::to_string((*handle).handler.packages()) {
+        Ok(json) => cstring_into_raw(json),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Return all `Availability` entries flattened across SKUs as a JSON array.
+/// Returns `"[]"` (a valid empty JSON array) when none exist.
+/// Caller frees with [`storelib_free_string`].
+///
+/// # Safety
+/// `handle` must be a valid non-null pointer.
+#[no_mangle]
+pub unsafe extern "C" fn storelib_availabilities_json(
+    handle: *const StorelibHandle,
+) -> *mut c_char {
+    if handle.is_null() {
+        return std::ptr::null_mut();
+    }
+    match serde_json::to_string(&(*handle).handler.availabilities()) {
+        Ok(json) => cstring_into_raw(json),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Return the `WuCategoryId` (used to drive FE3) from the first SKU's
+/// fulfillment data, or `NULL`. Caller frees with [`storelib_free_string`].
+///
+/// # Safety
+/// `handle` must be a valid non-null pointer.
+#[no_mangle]
+pub unsafe extern "C" fn storelib_wu_category_id(
+    handle: *const StorelibHandle,
+) -> *mut c_char {
+    if handle.is_null() {
+        return std::ptr::null_mut();
+    }
+    match (*handle).handler.wu_category_id() {
+        Some(s) => cstring_into_raw(s.to_owned()),
+        None => std::ptr::null_mut(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Batch query
+// ---------------------------------------------------------------------------
+
+/// Query the DisplayCatalog for many products in a single round-trip via
+/// the `bigIds` parameter.
+///
+/// `ids` is an array of `id_count` NUL-terminated UTF-8 strings; each must
+/// be a Microsoft Store Product ID (alternate identifiers are not supported
+/// by the batch endpoint). Returns the response as a JSON array of products
+/// (the same shape `storelib_product_json()` yields, but at the array level).
+///
+/// Returns `NULL` on error; inspect [`storelib_last_error`] for details.
+/// Caller frees the returned string with [`storelib_free_string`].
+///
+/// # Safety
+/// `handle` and `ids` must be valid non-null pointers; each `ids[i]` must
+/// be a valid NUL-terminated UTF-8 string. `auth_token` may be null.
+#[no_mangle]
+pub unsafe extern "C" fn storelib_query_batch_json(
+    handle: *mut StorelibHandle,
+    ids: *const *const c_char,
+    id_count: usize,
+    auth_token: *const c_char,
+) -> *mut c_char {
+    storelib_query_batch_json_with_cancel_impl(handle, ids, id_count, auth_token, std::ptr::null())
+}
+
+/// Cancellable variant of [`storelib_query_batch_json`].
+///
+/// # Safety
+/// Same as [`storelib_query_batch_json`]; `cancel` may be null.
+#[no_mangle]
+pub unsafe extern "C" fn storelib_query_batch_json_with_cancel(
+    handle: *mut StorelibHandle,
+    ids: *const *const c_char,
+    id_count: usize,
+    auth_token: *const c_char,
+    cancel: *const StorelibCancellation,
+) -> *mut c_char {
+    storelib_query_batch_json_with_cancel_impl(handle, ids, id_count, auth_token, cancel)
+}
+
+unsafe fn storelib_query_batch_json_with_cancel_impl(
+    handle: *mut StorelibHandle,
+    ids: *const *const c_char,
+    id_count: usize,
+    auth_token: *const c_char,
+    cancel: *const StorelibCancellation,
+) -> *mut c_char {
+    if handle.is_null() || ids.is_null() || id_count == 0 {
+        return std::ptr::null_mut();
+    }
+    let h = &mut *handle;
+    h.clear_error();
+
+    // Collect owned Strings so the &str refs we hand to the inner call have
+    // a stable backing store for the whole call.
+    let mut owned: Vec<String> = Vec::with_capacity(id_count);
+    for i in 0..id_count {
+        let ptr = *ids.add(i);
+        if ptr.is_null() {
+            h.set_error("ids[i] is null");
+            return std::ptr::null_mut();
+        }
+        match CStr::from_ptr(ptr).to_str() {
+            Ok(s) => owned.push(s.to_owned()),
+            Err(_) => {
+                h.set_error("ids[i] is not valid UTF-8");
+                return std::ptr::null_mut();
+            }
+        }
+    }
+    let id_refs: Vec<&str> = owned.iter().map(String::as_str).collect();
+
+    let token: Option<&str> = if auth_token.is_null() {
+        None
+    } else {
+        match CStr::from_ptr(auth_token).to_str() {
+            Ok(s) => Some(s),
+            Err(_) => {
+                h.set_error("auth_token is not valid UTF-8");
+                return std::ptr::null_mut();
+            }
+        }
+    };
+
+    let cancel_ref = if cancel.is_null() {
+        None
+    } else {
+        Some(&(*cancel).token)
+    };
+
+    match h.rt.block_on(
+        h.handler
+            .query_dcat_batch_with_cancel(&id_refs, token, cancel_ref),
+    ) {
+        Ok(()) => match serde_json::to_string(h.handler.products()) {
+            Ok(json) => cstring_into_raw(json),
+            Err(e) => {
+                h.set_error(&e.to_string());
+                std::ptr::null_mut()
+            }
+        },
+        Err(e) => {
+            h.set_error(&e.to_string());
+            std::ptr::null_mut()
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Packages
 // ---------------------------------------------------------------------------
 

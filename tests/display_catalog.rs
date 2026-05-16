@@ -13,6 +13,9 @@ use storelib_rs::services::display_catalog::DisplayCatalogHandler;
 // Netflix product ID — stable well-known app in the US store.
 const NETFLIX_PRODUCT_ID: &str = "9WZDNCRFJ3TJ";
 const NETFLIX_PFN: &str = "4DF9E0F8.Netflix_mcm4njqhnhss8";
+// Two other stable apps for batch testing — Hulu and Disney+.
+const HULU_PRODUCT_ID: &str = "9WZDNCRFJ3R8";
+const DISNEY_PRODUCT_ID: &str = "9NXQXXLFST89";
 
 fn make_handler() -> DisplayCatalogHandler {
     DisplayCatalogHandler::production()
@@ -124,19 +127,104 @@ async fn search_results_contain_relevant_title() {
         .await
         .expect("search_dcat should succeed");
 
-    // Results are grouped by product family; check any product title.
+    // Autosuggest returns a flat `Title` field; the per-product endpoint
+    // puts titles under `LocalizedProperties[].ProductTitle`. Accept either.
     let any_netflix = result
         .results
         .as_deref()
         .unwrap_or(&[])
         .iter()
         .flat_map(|g| g.products.as_deref().unwrap_or(&[]))
-        .flat_map(|p| p.localized_properties.as_deref().unwrap_or(&[]))
-        .filter_map(|lp| lp.product_title.as_deref())
-        .any(|t| t.to_lowercase().contains("netflix"));
+        .any(|p| {
+            let flat = p.title.as_deref();
+            let nested = p
+                .localized_properties
+                .as_deref()
+                .and_then(|v| v.first())
+                .and_then(|lp| lp.product_title.as_deref());
+            flat.into_iter()
+                .chain(nested)
+                .any(|t| t.to_lowercase().contains("netflix"))
+        });
 
     assert!(
         any_netflix,
         "At least one result should have 'Netflix' in the title"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Typed accessors
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore]
+async fn accessors_walk_live_netflix_listing() {
+    let mut handler = make_handler();
+    handler
+        .query_dcat(NETFLIX_PRODUCT_ID, IdentifierType::ProductId, None)
+        .await
+        .expect("query_dcat should succeed");
+
+    let title = handler.title().expect("title should be set");
+    assert!(
+        title.to_lowercase().contains("netflix"),
+        "title via accessor was {title:?}"
+    );
+    assert!(
+        handler.publisher_name().is_some(),
+        "publisher_name should be set"
+    );
+    // Netflix is free so price metadata may or may not be present; accessors
+    // must at minimum not panic and return sensible values.
+    let _ = handler.price();
+    let _ = handler.availabilities();
+    // packages() should be a slice (possibly empty for some product types).
+    let _ = handler.packages();
+    assert!(
+        handler.wu_category_id().is_some(),
+        "wu_category_id should be set for a downloadable app"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Batch query (bigIds)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore]
+async fn batch_query_returns_multiple_products() {
+    let mut handler = make_handler();
+    let ids = [NETFLIX_PRODUCT_ID, HULU_PRODUCT_ID, DISNEY_PRODUCT_ID];
+    handler
+        .query_dcat_batch(&ids, None)
+        .await
+        .expect("batch query should succeed");
+
+    let products = handler.products();
+    assert!(
+        products.len() >= 2,
+        "expected at least 2 products in batch response, got {}",
+        products.len(),
+    );
+    // Every returned product should have a title.
+    for p in products {
+        let title = p
+            .localized_properties
+            .as_deref()
+            .and_then(|v| v.first())
+            .and_then(|lp| lp.product_title.as_deref());
+        assert!(title.is_some(), "product missing ProductTitle: {p:?}");
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn batch_query_rejects_empty_ids() {
+    let mut handler = make_handler();
+    let err = handler
+        .query_dcat_batch(&[], None)
+        .await
+        .expect_err("empty ids should error");
+    assert!(matches!(err, storelib_rs::StoreError::Other(_)));
 }

@@ -326,6 +326,67 @@ export interface SearchResult {
     productFamilyName?: string | null;
     products?: ProductLike[] | null;
 }
+
+/** Price shape returned by `handler.price` and `handler.prices`. All fields
+ *  are optional because MS Store omits them for free/unavailable products. */
+export interface Price {
+    currencyCode?: string | null;
+    isPIRequired?: boolean | null;
+    listPrice?: number | null;
+    msrp?: number | null;
+    taxType?: string | null;
+    wholesaleCurrencyCode?: string | null;
+}
+
+/** Availability slice returned by `handler.availabilities`. Loosely typed
+ *  because the full Availability schema is large. */
+export interface Availability {
+    actions?: string[] | null;
+    availabilityId?: string | null;
+    conditions?: { [k: string]: any } | null;
+    markets?: string[] | null;
+    orderManagementData?: { price?: Price | null; [k: string]: any } | null;
+    properties?: { [k: string]: any } | null;
+    skuId?: string | null;
+    displayRank?: number | null;
+    [key: string]: any;
+}
+
+/** Package metadata returned by `handler.packages`. For the resolved
+ *  download URLs use `getPackagesForProduct` (returns `PackageInstance[]`). */
+export interface Package {
+    architectures?: string[] | null;
+    languages?: string[] | null;
+    packageFormat?: string | null;
+    packageFamilyName?: string | null;
+    packageFullName?: string | null;
+    packageId?: string | null;
+    packageRank?: number | null;
+    packageUri?: string | null;
+    maxDownloadSizeInBytes?: number | null;
+    maxInstallSizeInBytes?: number | null;
+    version?: string | null;
+    hash?: string | null;
+    hashAlgorithm?: string | null;
+    isStreamingApp?: boolean | null;
+    capabilities?: string[] | null;
+    contentId?: string | null;
+    [key: string]: any;
+}
+
+/** Image asset returned by `handler.imagesWithPurpose`. */
+export interface Image {
+    backgroundColor?: string | null;
+    caption?: string | null;
+    fileSizeInBytes?: number | null;
+    foregroundColor?: string | null;
+    height?: number | null;
+    imagePositionInfo?: string | null;
+    imagePurpose?: string | null;
+    unscaledImageSha256Hash?: string | null;
+    uri?: string | null;
+    width?: number | null;
+}
 "#;
 
 // ---------------------------------------------------------------------------
@@ -746,6 +807,101 @@ impl DisplayCatalogHandlerJs {
     #[wasm_bindgen(getter)]
     pub fn error(&self) -> Option<String> {
         self.inner.error.clone()
+    }
+
+    // -- typed product accessors ------------------------------------------
+    //
+    // These mirror the native accessors on `DisplayCatalogHandler`.
+
+    #[wasm_bindgen(getter)]
+    pub fn title(&self) -> Option<String> {
+        self.inner.title().map(str::to_owned)
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn description(&self) -> Option<String> {
+        self.inner.description().map(str::to_owned)
+    }
+
+    #[wasm_bindgen(getter, js_name = publisherName)]
+    pub fn publisher_name(&self) -> Option<String> {
+        self.inner.publisher_name().map(str::to_owned)
+    }
+
+    #[wasm_bindgen(getter, js_name = wuCategoryId)]
+    pub fn wu_category_id(&self) -> Option<String> {
+        self.inner.wu_category_id().map(str::to_owned)
+    }
+
+    #[wasm_bindgen(getter, js_name = lastModifiedDate)]
+    pub fn last_modified_date(&self) -> Option<String> {
+        self.inner.last_modified_date().map(str::to_owned)
+    }
+
+    /// First [`Price`] across all SKUs / availabilities, or `null` if none
+    /// is listed (e.g. the product is free or unavailable in the locale).
+    #[wasm_bindgen(getter, unchecked_return_type = "Price | null")]
+    pub fn price(&self) -> Result<JsValue, JsError> {
+        to_value(&self.inner.price()).map_err(js_err)
+    }
+
+    /// Every [`Price`] across all availabilities (an app can have multiple
+    /// for different markets / channels).
+    #[wasm_bindgen(getter, unchecked_return_type = "Price[]")]
+    pub fn prices(&self) -> Result<JsValue, JsError> {
+        to_value(&self.inner.prices()).map_err(js_err)
+    }
+
+    /// Packages from the first SKU's properties. For the resolved download
+    /// URLs, use `getPackagesForProduct` instead.
+    #[wasm_bindgen(getter, unchecked_return_type = "Package[]")]
+    pub fn packages(&self) -> Result<JsValue, JsError> {
+        to_value(self.inner.packages()).map_err(js_err)
+    }
+
+    /// All `Availability` entries flattened across the product's SKUs.
+    #[wasm_bindgen(getter, unchecked_return_type = "Availability[]")]
+    pub fn availabilities(&self) -> Result<JsValue, JsError> {
+        to_value(&self.inner.availabilities()).map_err(js_err)
+    }
+
+    /// All products from the most recent query (single or batch).
+    #[wasm_bindgen(getter, unchecked_return_type = "ProductLike[]")]
+    pub fn products(&self) -> Result<JsValue, JsError> {
+        to_value(self.inner.products()).map_err(js_err)
+    }
+
+    /// Images on the first localized property filtered by `purpose`
+    /// (case-sensitive PascalCase, e.g. `"Logo"`, `"Tile"`, `"Screenshot"`).
+    #[wasm_bindgen(js_name = imagesWithPurpose, unchecked_return_type = "Image[]")]
+    pub fn images_with_purpose(&self, purpose: &str) -> Result<JsValue, JsError> {
+        to_value(&self.inner.images_with_purpose(purpose)).map_err(js_err)
+    }
+
+    // -- batch product query ----------------------------------------------
+
+    /// Query DisplayCatalog for many products in a single round-trip.
+    /// `ids` must be Microsoft Store Product IDs — alternate identifiers
+    /// are not supported by the batch endpoint. Populates `productListing`
+    /// and `products`.
+    #[wasm_bindgen(
+        js_name = queryDcatBatch,
+        unchecked_return_type = "ProductLike[]"
+    )]
+    pub async fn query_dcat_batch(
+        &mut self,
+        ids: Vec<String>,
+        auth_token: Option<String>,
+        #[wasm_bindgen(unchecked_param_type = "AbortSignal | null")] signal: Option<JsValue>,
+    ) -> Result<JsValue, JsValue> {
+        let adapter = adapt_signal(&signal)?;
+        let cancel = adapter.as_ref().map(|a| &a.token);
+        let id_refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+        self.inner
+            .query_dcat_batch_with_cancel(&id_refs, auth_token.as_deref(), cancel)
+            .await
+            .map_err(store_err)?;
+        Ok(to_value(self.inner.products()).map_err(js_err)?)
     }
 }
 

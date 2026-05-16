@@ -7,15 +7,19 @@ Supports native (tokio), **WebAssembly**, and **C / FFI** targets.
 ## Features
 
 - Query the Microsoft Store Display Catalog by Product ID, Package Family Name, Xbox Title ID, and more
+- **Batch lookup** — fetch many products in one HTTP round-trip via `bigIds`
 - Resolve direct `.appx` / `.msix` / `.eappx` download URLs via the FE3 delivery service
+- **Typed product accessors** — `handler.title()`, `.price()`, `.packages()`, `.images_with_purpose()` etc. walk the catalog tree without `display_sku_availabilities.as_deref()?.first()?...` chains
 - Search the catalog by query string and device family
 - 7 endpoints (Production, Int, Xbox, XboxInt, Dev, OneP, OnePInt)
 - 259 markets + 185 ISO 639-1 languages + 350 Microsoft Store BCP-47 language tags (sourced from the IANA registry + `learn.microsoft.com`'s supported-languages table)
 - `Locale::from_tag("en-US")` / `Locale.fromTag("zh-Hant-TW")` builds a locale directly from a BCP-47 tag
 - Optional MSA / XBL3.0 authentication token support for sandboxed and flighted listings
 - **Real-time progress reporting** via a callback on every platform (native closure / JS function / C function pointer)
-- **Cancellation** via `AbortSignal` (WASM) / `StoreError::Cancelled` (native)
+- **Cancellation** via `AbortSignal` (WASM), `CancellationToken` (native), or `StorelibCancellation` (FFI). Cancel from any thread.
+- **Configurable retry + timeout** — `ClientConfig` exposes `timeout`, `max_retries`, `initial_backoff`, `max_backoff`, `retry_on_status`. Cancel-aware backoff returns `Cancelled` instantly.
 - **Structured errors** in JS — thrown `Error` objects carry a `kind` discriminant (`"http" | "json" | "xml" | "notFound" | "timedOut" | "cancelled" | "other"`)
+- **First-class TypeScript types** — every WASM binding is typed (`Promise<DisplayCatalogModel | null>`, `Promise<PackageInstance[]>`, …); no more `any` returns
 - camelCase JSON wire format across all bindings; PascalCase from the upstream MS Store API is accepted on the way in
 - Structured logging via the `log` facade (`env_logger` on native, pluggable on WASM)
 
@@ -46,10 +50,36 @@ let mut handler = DisplayCatalogHandler::production();
 handler.query_dcat("9wzdncrfj3tj", IdentifierType::ProductId, None).await?;
 
 if handler.is_found {
-    let listing = handler.product_listing.as_ref().unwrap();
-    // listing.products / listing.product contain the full catalog model
+    // Typed accessors walk the catalog tree for you — no manual
+    // `display_sku_availabilities.as_deref()?.first()?.sku.as_ref()?...` chains.
+    println!("Title:     {:?}", handler.title());
+    println!("Publisher: {:?}", handler.publisher_name());
+    println!("Price:     {:?}", handler.price().map(|p| (&p.currency_code, p.list_price)));
+    println!("Packages:  {}", handler.packages().len());
+
+    // The raw model is still available if you need a field the accessors
+    // don't expose.
+    let _listing = handler.product_listing.as_ref().unwrap();
 }
 ```
+
+### Batch query (many products in one round-trip)
+
+```rust
+let ids = ["9WZDNCRFJ3TJ", "9NBLGGH4R315", "9P3JFPWWDZRC"];
+handler.query_dcat_batch(&ids, None).await?;
+
+for product in handler.products() {
+    let title = product
+        .localized_properties.as_deref()
+        .and_then(|v| v.first())
+        .and_then(|lp| lp.product_title.as_deref())
+        .unwrap_or("<no title>");
+    println!("{title}");
+}
+```
+
+`query_dcat_batch` accepts Microsoft Store Product IDs only — the `bigIds` endpoint doesn't support alternate identifiers.
 
 ### Resolve package download URLs
 
@@ -147,12 +177,26 @@ setTimeout(() => ctrl.abort(), 5000);
 
 try {
     await handler.queryDcat('9WZDNCRFJ3TJ', 'ProductId', null, ctrl.signal);
+
+    // Typed accessors on the handler — read fields without hand-walking the model.
+    console.log(handler.title, handler.publisherName, handler.price);
+
     const pkgs = await handler.getPackagesForProduct(null, ctrl.signal);
     // pkgs: Array<{ packageMoniker, packageUri, packageType, applicabilityBlob, updateId, packageSize }>
 } catch (e) {
     if (e.kind === 'cancelled') return;
     if (e.kind === 'notFound') showNotFound();
     else console.error(e.kind, e.message);
+}
+
+// Batch lookup — single round-trip for many products.
+const products = await handler.queryDcatBatch(
+    ['9WZDNCRFJ3TJ', '9NBLGGH4R315', '9P3JFPWWDZRC'],
+    null,
+    null,
+);
+for (const p of products) {
+    console.log(p.localizedProperties?.[0]?.productTitle);
 }
 
 // Enumerate the full Microsoft Store BCP-47 tag list.
@@ -162,6 +206,8 @@ for (const {code, englishName} of listLanguageTags()) {
 ```
 
 The `idType` argument to `queryDcat` is tolerant — `"ProductId"`, `"productId"`, `"product-id"`, and `"PRODUCT_ID"` all resolve to the same enum.
+
+The handler exposes typed JS getters for common fields: `title`, `description`, `publisherName`, `price`, `prices`, `packages`, `availabilities`, `products`, `wuCategoryId`, `lastModifiedDate`, plus `imagesWithPurpose("Logo" | "Tile" | "Screenshot" | …)`.
 
 ## CLI usage
 
@@ -246,14 +292,23 @@ int main(void) {
 
     int32_t rc = storelib_query(h, "9wzdncrfj3tj", STORELIB_ID_PRODUCT_ID, NULL);
     if (rc == STORELIB_OK && storelib_is_found(h)) {
+        char* title = storelib_product_title(h);
+        if (title) { printf("Title: %s\n", title); storelib_free_string(title); }
+
+        char* price = storelib_price_json(h);
+        if (price) { printf("Price: %s\n", price); storelib_free_string(price); }
+
         char* json = storelib_packages_json(h, NULL);
-        if (json) {
-            puts(json);
-            storelib_free_string(json);
-        }
+        if (json) { puts(json); storelib_free_string(json); }
     } else {
         fprintf(stderr, "query failed (%d): %s\n", rc, storelib_last_error(h));
     }
+
+    // Batch query — one HTTP round-trip for three products.
+    const char* ids[] = { "9WZDNCRFJ3TJ", "9NBLGGH4R315", "9P3JFPWWDZRC" };
+    char* batch = storelib_query_batch_json(h, ids, 3, NULL);
+    if (batch) { puts(batch); storelib_free_string(batch); }
+
     storelib_free(h);
     return 0;
 }

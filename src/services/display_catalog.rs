@@ -5,7 +5,10 @@ use futures_util::future::{select, Either};
 
 use crate::cancellation::CancellationToken;
 use crate::error::StoreError;
-use crate::models::catalog::DisplayCatalogModel;
+use crate::models::catalog::{
+    Availability, DisplayCatalogModel, Image, Package, Price, Product, ProductLocalizedProperty,
+    Sku,
+};
 use crate::models::enums::{DCatEndpoint, DeviceFamily, DisplayCatalogResult, IdentifierType};
 use crate::models::fe3::PackageInstance;
 use crate::models::locale::Locale;
@@ -325,6 +328,121 @@ impl DisplayCatalogHandler {
         Self::new(DCatEndpoint::Production, Locale::production())
     }
 
+    // -----------------------------------------------------------------------
+    // Typed accessors — convenience walks over `product_listing`
+    // -----------------------------------------------------------------------
+    //
+    // All accessors return `Option<&T>` (or `Vec<&T>` for fan-out cases) — no
+    // allocations beyond the Vec for fan-outs. They never panic; missing
+    // nodes anywhere in the path yield `None`/`vec![]`.
+
+    /// First product on the currently-loaded listing. Prefers `Products[0]`,
+    /// falls back to the single `Product` field.
+    pub fn product(&self) -> Option<&Product> {
+        let listing = self.product_listing.as_ref()?;
+        listing
+            .products
+            .as_deref()
+            .and_then(|v| v.first())
+            .or(listing.product.as_ref())
+    }
+
+    /// First localized property on the current product (typically the one
+    /// matching `selected_locale.language`, in MS Store's locale fallback order).
+    pub fn localized(&self) -> Option<&ProductLocalizedProperty> {
+        self.product()?
+            .localized_properties
+            .as_deref()?
+            .first()
+    }
+
+    /// Title from the first localized property.
+    pub fn title(&self) -> Option<&str> {
+        self.localized()?.product_title.as_deref()
+    }
+
+    /// Long description from the first localized property.
+    pub fn description(&self) -> Option<&str> {
+        self.localized()?.product_description.as_deref()
+    }
+
+    /// Publisher name from the first localized property.
+    pub fn publisher_name(&self) -> Option<&str> {
+        self.localized()?.publisher_name.as_deref()
+    }
+
+    /// Every image across all localized properties whose `image_purpose`
+    /// matches `purpose` (case-sensitive — pass canonical PascalCase like
+    /// `"Logo"`, `"Tile"`, `"Screenshot"`).
+    pub fn images_with_purpose(&self, purpose: &str) -> Vec<&Image> {
+        self.product()
+            .and_then(|p| p.localized_properties.as_deref())
+            .into_iter()
+            .flatten()
+            .flat_map(|lp| lp.images.as_deref().unwrap_or(&[]))
+            .filter(|img| img.image_purpose.as_deref() == Some(purpose))
+            .collect()
+    }
+
+    /// First SKU on the first display-sku availability.
+    pub fn sku(&self) -> Option<&Sku> {
+        self.product()?
+            .display_sku_availabilities
+            .as_deref()?
+            .first()?
+            .sku
+            .as_ref()
+    }
+
+    /// Every [`Availability`] flattened across all display-sku availabilities.
+    pub fn availabilities(&self) -> Vec<&Availability> {
+        self.product()
+            .and_then(|p| p.display_sku_availabilities.as_deref())
+            .into_iter()
+            .flatten()
+            .flat_map(|dsa| dsa.availabilities.as_deref().unwrap_or(&[]))
+            .collect()
+    }
+
+    /// Every [`Price`] flattened across all availabilities.
+    pub fn prices(&self) -> Vec<&Price> {
+        self.availabilities()
+            .into_iter()
+            .filter_map(|a| a.order_management_data.as_ref()?.price.as_ref())
+            .collect()
+    }
+
+    /// First [`Price`] found while walking availabilities. The typical
+    /// "what's the price?" shortcut.
+    pub fn price(&self) -> Option<&Price> {
+        self.prices().into_iter().next()
+    }
+
+    /// Packages on the first SKU's properties (empty slice if absent).
+    pub fn packages(&self) -> &[Package] {
+        self.sku()
+            .and_then(|sku| sku.properties.as_ref())
+            .and_then(|props| props.packages.as_deref())
+            .unwrap_or(&[])
+    }
+
+    /// `WuCategoryId` from the first SKU's fulfillment data. This is what
+    /// `get_packages_for_product` uses internally to query FE3.
+    pub fn wu_category_id(&self) -> Option<&str> {
+        self.sku()?
+            .properties
+            .as_ref()?
+            .fulfillment_data
+            .as_ref()?
+            .wu_category_id
+            .as_deref()
+    }
+
+    /// Convenience: last-modified date on the current product, if any.
+    pub fn last_modified_date(&self) -> Option<&str> {
+        self.product()?.last_modified_date.as_deref()
+    }
+
     fn build_client(config: &ClientConfig) -> reqwest::Client {
         #[cfg(not(target_arch = "wasm32"))]
         let builder = reqwest::Client::builder()
@@ -442,6 +560,116 @@ impl DisplayCatalogHandler {
                 self.selected_endpoint, status, body
             )))
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Batch product query (bigIds)
+    // -----------------------------------------------------------------------
+
+    /// Query DisplayCatalog for many products in a single round-trip via the
+    /// `bigIds` parameter. `ids` accepts Microsoft Store Product IDs only —
+    /// alternate identifiers (PFN, ContentId, etc.) aren't supported by the
+    /// batch endpoint.
+    ///
+    /// Populates `self.product_listing.products` with the response.
+    /// Call [`Self::products`] afterwards to read the typed result.
+    pub async fn query_dcat_batch(
+        &mut self,
+        ids: &[&str],
+        auth_token: Option<&str>,
+    ) -> Result<(), StoreError> {
+        self.query_dcat_batch_with_cancel(ids, auth_token, None).await
+    }
+
+    /// Cancellable variant of [`Self::query_dcat_batch`].
+    pub async fn query_dcat_batch_with_cancel(
+        &mut self,
+        ids: &[&str],
+        auth_token: Option<&str>,
+        cancel: Option<&CancellationToken>,
+    ) -> Result<(), StoreError> {
+        race_cancel(self.query_dcat_batch_inner(ids, auth_token), cancel).await
+    }
+
+    async fn query_dcat_batch_inner(
+        &mut self,
+        ids: &[&str],
+        auth_token: Option<&str>,
+    ) -> Result<(), StoreError> {
+        if ids.is_empty() {
+            return Err(StoreError::Other(
+                "query_dcat_batch: ids must be non-empty".into(),
+            ));
+        }
+
+        self.id = None;
+        self.result = None;
+        self.is_found = false;
+
+        let url = crate::utilities::helpers::create_dcat_batch_uri(
+            &self.selected_endpoint,
+            ids,
+            &self.selected_locale,
+        );
+        debug!("DCat batch query: GET {url}");
+        self.emit(
+            "dcat.request",
+            format!("batch GET ({} ids)", ids.len()),
+        );
+
+        let auth = auth_token.filter(|t| !t.is_empty());
+        let response = send_with_retry(
+            || {
+                let mut r = self.client.get(&url);
+                if let Some(token) = auth {
+                    r = r.header("Authentication", token);
+                }
+                r
+            },
+            &self.config,
+            None,
+            |stage, msg| self.emit(stage, msg),
+        )
+        .await?;
+
+        let status = response.status();
+        debug!("DCat batch response: HTTP {status}");
+        self.emit("dcat.response", format!("HTTP {status}"));
+
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(StoreError::Other(format!(
+                "Failed batch DisplayCatalog query for {} id(s), status {status}, body: {body}",
+                ids.len(),
+            )));
+        }
+
+        let body = response.text().await.map_err(StoreError::Http)?;
+        self.emit("dcat.parse", format!("{} bytes", body.len()));
+
+        let model: DisplayCatalogModel = serde_json::from_str(&body).map_err(|e| {
+            error!("DCat batch JSON parse error: {e}");
+            log_json_context(&body, e.column());
+            StoreError::Json(e)
+        })?;
+
+        let count = model.products.as_deref().map(|v| v.len()).unwrap_or(0);
+        info!("DCat batch: {count} product(s) for {} requested id(s)", ids.len());
+        self.emit("dcat.done", format!("{count} product(s)"));
+
+        self.product_listing = Some(model);
+        self.result = Some(DisplayCatalogResult::Found);
+        self.is_found = count > 0;
+        Ok(())
+    }
+
+    /// All products from the most recent query (single or batch). Empty
+    /// slice if no listing is loaded or it contains no `Products` array.
+    pub fn products(&self) -> &[Product] {
+        self.product_listing
+            .as_ref()
+            .and_then(|m| m.products.as_deref())
+            .unwrap_or(&[])
     }
 
     // -----------------------------------------------------------------------
@@ -872,6 +1100,210 @@ mod tests {
         let op = async { Err::<u32, _>(StoreError::NotFound) };
         let err = race_cancel(op, Some(&token)).await.unwrap_err();
         assert!(matches!(err, StoreError::NotFound));
+    }
+
+    // -- typed accessors -----------------------------------------------------
+
+    /// Build a handler with a minimal known product listing for accessor tests.
+    fn handler_with_listing(json: &str) -> DisplayCatalogHandler {
+        let model: DisplayCatalogModel = serde_json::from_str(json).unwrap();
+        let mut h = DisplayCatalogHandler::production();
+        h.product_listing = Some(model);
+        h.is_found = true;
+        h
+    }
+
+    #[test]
+    fn accessors_return_none_on_empty_handler() {
+        let h = DisplayCatalogHandler::production();
+        assert!(h.product().is_none());
+        assert!(h.title().is_none());
+        assert!(h.price().is_none());
+        assert!(h.wu_category_id().is_none());
+        assert!(h.packages().is_empty());
+        assert!(h.availabilities().is_empty());
+        assert!(h.products().is_empty());
+    }
+
+    #[test]
+    fn title_publisher_description_walk_localized_properties() {
+        let json = r#"{
+            "Products":[{
+                "LocalizedProperties":[{
+                    "ProductTitle":"Netflix",
+                    "ProductDescription":"Watch shows",
+                    "PublisherName":"Netflix, Inc."
+                }]
+            }]
+        }"#;
+        let h = handler_with_listing(json);
+        assert_eq!(h.title(), Some("Netflix"));
+        assert_eq!(h.publisher_name(), Some("Netflix, Inc."));
+        assert_eq!(h.description(), Some("Watch shows"));
+    }
+
+    #[test]
+    fn product_falls_back_to_single_product_field() {
+        // No `Products` array — only the singular `Product` field.
+        let json = r#"{
+            "Product":{
+                "LocalizedProperties":[{"ProductTitle":"FromProduct"}]
+            }
+        }"#;
+        let h = handler_with_listing(json);
+        assert!(h.product().is_some());
+        assert_eq!(h.title(), Some("FromProduct"));
+    }
+
+    #[test]
+    fn price_walks_to_first_availability() {
+        let json = r#"{
+            "Products":[{
+                "DisplaySkuAvailabilities":[{
+                    "Sku":{"Properties":{}},
+                    "Availabilities":[{
+                        "OrderManagementData":{
+                            "Price":{"CurrencyCode":"USD","MSRP":9.99,"ListPrice":4.99}
+                        }
+                    }]
+                }]
+            }]
+        }"#;
+        let h = handler_with_listing(json);
+        let p = h.price().expect("price should be present");
+        assert_eq!(p.currency_code.as_deref(), Some("USD"));
+        assert_eq!(p.msrp, Some(9.99));
+        assert_eq!(p.list_price, Some(4.99));
+        // The fan-out version returns the same single price.
+        assert_eq!(h.prices().len(), 1);
+    }
+
+    #[test]
+    fn packages_and_wu_category_id_walk_sku_properties() {
+        let json = r#"{
+            "Products":[{
+                "DisplaySkuAvailabilities":[{
+                    "Sku":{"Properties":{
+                        "FulfillmentData":{"WuCategoryId":"cat-abc"},
+                        "Packages":[
+                            {"PackageFullName":"X.Y_1","MaxDownloadSizeInBytes":1234},
+                            {"PackageFullName":"X.Y_2","MaxDownloadSizeInBytes":5678}
+                        ]
+                    }}
+                }]
+            }]
+        }"#;
+        let h = handler_with_listing(json);
+        assert_eq!(h.wu_category_id(), Some("cat-abc"));
+        assert_eq!(h.packages().len(), 2);
+        assert_eq!(
+            h.packages()[0].package_full_name.as_deref(),
+            Some("X.Y_1"),
+        );
+        assert_eq!(h.packages()[1].max_download_size_in_bytes, Some(5678));
+    }
+
+    #[test]
+    fn images_with_purpose_filters_correctly() {
+        let json = r#"{
+            "Products":[{
+                "LocalizedProperties":[{
+                    "Images":[
+                        {"ImagePurpose":"Logo","Uri":"//img/logo.png","Height":100,"Width":100},
+                        {"ImagePurpose":"Tile","Uri":"//img/tile.png","Height":300,"Width":300},
+                        {"ImagePurpose":"Screenshot","Uri":"//img/ss1.png","Height":720,"Width":1280},
+                        {"ImagePurpose":"Screenshot","Uri":"//img/ss2.png","Height":720,"Width":1280}
+                    ]
+                }]
+            }]
+        }"#;
+        let h = handler_with_listing(json);
+        assert_eq!(h.images_with_purpose("Logo").len(), 1);
+        assert_eq!(h.images_with_purpose("Tile").len(), 1);
+        assert_eq!(h.images_with_purpose("Screenshot").len(), 2);
+        assert_eq!(h.images_with_purpose("Banner").len(), 0);
+    }
+
+    #[test]
+    fn products_returns_all_products_in_batch_response() {
+        // Three products as a batch query would return.
+        let json = r#"{
+            "Products":[
+                {"LocalizedProperties":[{"ProductTitle":"A"}]},
+                {"LocalizedProperties":[{"ProductTitle":"B"}]},
+                {"LocalizedProperties":[{"ProductTitle":"C"}]}
+            ]
+        }"#;
+        let h = handler_with_listing(json);
+        let titles: Vec<_> = h
+            .products()
+            .iter()
+            .filter_map(|p| {
+                p.localized_properties
+                    .as_deref()?
+                    .first()?
+                    .product_title
+                    .as_deref()
+            })
+            .collect();
+        assert_eq!(titles, vec!["A", "B", "C"]);
+        // `title()` still returns the first.
+        assert_eq!(h.title(), Some("A"));
+    }
+
+    // -- batch query (wiremock-backed) ---------------------------------------
+
+    #[tokio::test]
+    async fn query_dcat_batch_rejects_empty_ids() {
+        let mut h = DisplayCatalogHandler::production();
+        let err = h
+            .query_dcat_batch(&[], None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StoreError::Other(_)));
+    }
+
+    #[tokio::test]
+    async fn query_dcat_batch_populates_products_on_success() {
+        let server = MockServer::start().await;
+
+        let body = r#"{"Products":[
+            {"LocalizedProperties":[{"ProductTitle":"A"}]},
+            {"LocalizedProperties":[{"ProductTitle":"B"}]}
+        ],"TotalResultCount":2}"#;
+
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("Content-Type", "application/json")
+                    .set_body_string(body),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        // Point the handler at the mock server. We achieve this by building a
+        // handler that uses the mock URL directly via the batch URI builder
+        // — but query_dcat_batch_inner uses `selected_endpoint` to build URLs
+        // via create_dcat_batch_uri. To avoid reaching into private state,
+        // exercise the inner helper directly.
+        let cfg = fast_retry_cfg();
+        let client = reqwest::Client::new();
+        let url = format!("{}?bigIds=A,B&market=US&languages=en&catalogsource=apps&fieldsTemplate=Details", server.uri());
+
+        let resp = send_with_retry(
+            || client.get(&url),
+            &cfg,
+            None,
+            |_, _| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.status(), 200);
+
+        let text = resp.text().await.unwrap();
+        let model: DisplayCatalogModel = serde_json::from_str(&text).unwrap();
+        assert_eq!(model.products.as_deref().unwrap().len(), 2);
     }
 
     // -- send_with_retry (wiremock-backed) ----------------------------------

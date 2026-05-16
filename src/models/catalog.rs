@@ -43,6 +43,20 @@ pub struct DisplayCatalogModel {
 pub struct Product {
     pub last_modified_date: Option<String>,
     pub localized_properties: Option<Vec<ProductLocalizedProperty>>,
+    /// Flat title field returned by the `/productFamilies/autosuggest`
+    /// endpoint (the per-product `/products/{id}` endpoint puts titles under
+    /// `LocalizedProperties[].ProductTitle` instead — see
+    /// [`Self::localized_properties`]).
+    #[serde(default, rename(serialize = "title", deserialize = "Title"))]
+    pub title: Option<String>,
+    /// Flat icon URL returned by autosuggest (protocol-relative, e.g.
+    /// `//store-images.s-microsoft.com/...`).
+    #[serde(default, rename(serialize = "icon", deserialize = "Icon"))]
+    pub icon: Option<String>,
+    /// Product type string from autosuggest (e.g. `"Application"`,
+    /// `"Game"`). For the typed enum see [`ProductKind`].
+    #[serde(default, rename(serialize = "type", deserialize = "Type"))]
+    pub r#type: Option<String>,
     pub market_properties: Option<Vec<ProductMarketProperty>>,
     #[serde(rename(serialize = "productASchema", deserialize = "ProductASchema"))]
     pub product_a_schema: Option<String>,

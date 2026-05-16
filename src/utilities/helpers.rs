@@ -47,6 +47,24 @@ pub fn endpoint_to_search_url(endpoint: &DCatEndpoint) -> &'static str {
 // URI construction
 // ---------------------------------------------------------------------------
 
+/// Build a DisplayCatalog batch URL that fetches multiple products in a
+/// single request via the `bigIds=A,B,C` parameter. Returns a URL like
+/// `…/products?bigIds=9WZDN…,9NBLG…&market=US&languages=en&catalogsource=apps&fieldsTemplate=Details`.
+///
+/// `ids` should contain Microsoft Store Product IDs only (the `bigIds`
+/// parameter does not accept alternate identifiers).
+pub fn create_dcat_batch_uri(
+    endpoint: &DCatEndpoint,
+    ids: &[&str],
+    locale: &Locale,
+) -> String {
+    // base ends with "/products/"; drop the slash so `?bigIds=...` attaches cleanly.
+    let base = endpoint_to_base_url(endpoint).trim_end_matches('/');
+    let trail = locale.dcat_trail();
+    let joined = ids.join(",");
+    format!("{base}?bigIds={joined}&{trail}&fieldsTemplate=Details")
+}
+
 /// Build a full DisplayCatalog request URL from its components.
 ///
 /// Mirrors `UriHelpers.CreateAlternateDCatUri` from the C# original.
@@ -221,6 +239,51 @@ mod tests {
             &prod_locale(),
         );
         assert!(uri.contains("alternateId=LegacyWindowsPhoneProductID"));
+    }
+
+    // -- create_dcat_batch_uri ------------------------------------------------
+
+    #[test]
+    fn batch_uri_joins_ids_with_commas() {
+        let uri = create_dcat_batch_uri(
+            &DCatEndpoint::Production,
+            &["9WZDNCRFJ3TJ", "9NBLGGH4R315"],
+            &prod_locale(),
+        );
+        assert!(
+            uri.starts_with("https://displaycatalog.mp.microsoft.com/v7.0/products?"),
+            "got: {uri}",
+        );
+        assert!(uri.contains("bigIds=9WZDNCRFJ3TJ,9NBLGGH4R315"), "got: {uri}");
+        assert!(uri.contains("market=US"));
+        assert!(uri.contains("fieldsTemplate=Details"));
+        // No trailing slash before the query string.
+        assert!(!uri.contains("products/?"), "got: {uri}");
+    }
+
+    #[test]
+    fn batch_uri_single_id_has_no_comma() {
+        let uri = create_dcat_batch_uri(
+            &DCatEndpoint::Production,
+            &["9WZDNCRFJ3TJ"],
+            &prod_locale(),
+        );
+        assert!(uri.contains("bigIds=9WZDNCRFJ3TJ&"));
+        assert!(!uri.contains(",&"));
+    }
+
+    #[test]
+    fn batch_uri_carries_locale_overrides() {
+        let locale = Locale::new(Market::De, Lang::De, false);
+        let uri = create_dcat_batch_uri(
+            &DCatEndpoint::Xbox,
+            &["A", "B", "C"],
+            &locale,
+        );
+        assert!(uri.starts_with("https://xbox-displaycatalog.mp.microsoft.com/v7.0/products?"));
+        assert!(uri.contains("bigIds=A,B,C"));
+        assert!(uri.contains("market=DE"));
+        assert!(uri.contains("languages=de"));
     }
 
     #[test]

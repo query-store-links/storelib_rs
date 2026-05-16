@@ -58,5 +58,6 @@ pub use services::fe3::FE3Handler;
 
 // utilities
 pub use utilities::helpers::{
-    create_dcat_uri, endpoint_to_base_url, endpoint_to_search_url, string_to_package_type,
+    create_dcat_batch_uri, create_dcat_uri, endpoint_to_base_url, endpoint_to_search_url,
+    string_to_package_type,
 };

@@ -139,6 +139,91 @@ int32_t storelib_is_found(const StorelibHandle* handle);
 char* storelib_product_json(const StorelibHandle* handle);
 
 /* -------------------------------------------------------------------------
+ * Typed accessors  (convenience views over storelib_product_json output)
+ * ---------------------------------------------------------------------- */
+
+/**
+ * Return the first product's title (UTF-8, NUL-terminated), or NULL if
+ * the listing has no localized properties or no title.
+ *
+ * Caller frees the returned string with storelib_free_string().
+ */
+char* storelib_product_title(const StorelibHandle* handle);
+
+/**
+ * Return the first product's publisher name, or NULL.
+ * Caller frees with storelib_free_string().
+ */
+char* storelib_product_publisher(const StorelibHandle* handle);
+
+/**
+ * Return the first price as a JSON object:
+ *   {"currencyCode", "isPIRequired", "listPrice", "msrp",
+ *    "taxType", "wholesaleCurrencyCode"}
+ * Returns NULL if the product has no priced availability.
+ * Caller frees with storelib_free_string().
+ */
+char* storelib_price_json(const StorelibHandle* handle);
+
+/**
+ * Return all `Package` entries from the first SKU as a JSON array.
+ * For *resolved* download URLs use storelib_packages_json() instead;
+ * this returns the catalog metadata only.
+ * Caller frees with storelib_free_string().
+ */
+char* storelib_packages_listed_json(const StorelibHandle* handle);
+
+/**
+ * Return all `Availability` entries flattened across the product's SKUs,
+ * as a JSON array. Returns "[]" if no listing is loaded.
+ * Caller frees with storelib_free_string().
+ */
+char* storelib_availabilities_json(const StorelibHandle* handle);
+
+/**
+ * Return the WuCategoryId from the first SKU's fulfillment data, or NULL.
+ * Caller frees with storelib_free_string().
+ */
+char* storelib_wu_category_id(const StorelibHandle* handle);
+
+/* -------------------------------------------------------------------------
+ * Batch query  (multiple products in one HTTP round-trip)
+ * ---------------------------------------------------------------------- */
+
+/**
+ * Query the DisplayCatalog for many products in a single round-trip via
+ * the `bigIds` parameter.
+ *
+ * @param handle      A valid handle from storelib_new().
+ * @param ids         Array of `id_count` NUL-terminated UTF-8 strings;
+ *                    each must be a Microsoft Store Product ID
+ *                    (alternate identifiers are not supported here).
+ * @param id_count    Number of entries in `ids` (must be > 0).
+ * @param auth_token  Optional MSA / XBL3.0 token, or NULL.
+ *
+ * Returns the response as a JSON array of products on success, or NULL
+ * on error (inspect storelib_last_error()).
+ * Caller frees the returned string with storelib_free_string().
+ */
+char* storelib_query_batch_json(
+    StorelibHandle*    handle,
+    const char* const* ids,
+    size_t             id_count,
+    const char*        auth_token
+);
+
+/**
+ * Cancellable variant of storelib_query_batch_json().
+ */
+char* storelib_query_batch_json_with_cancel(
+    StorelibHandle*             handle,
+    const char* const*          ids,
+    size_t                      id_count,
+    const char*                 auth_token,
+    const StorelibCancellation* cancel
+);
+
+/* -------------------------------------------------------------------------
  * Package resolution
  * ---------------------------------------------------------------------- */
 
