@@ -9,7 +9,8 @@
 use std::str::FromStr;
 
 use js_sys::{Function, Reflect};
-use serde_wasm_bindgen::{from_value, to_value};
+use serde::Serialize;
+use serde_wasm_bindgen::{from_value, Serializer};
 use wasm_bindgen::prelude::*;
 
 use crate::cancellation::CancellationToken;
@@ -26,6 +27,29 @@ use crate::utilities::helpers as h;
 
 fn js_err<E: std::fmt::Display>(e: E) -> JsError {
     JsError::new(&e.to_string())
+}
+
+/// Serialize any `serde::Serialize` value into a `JsValue`, emitting JS
+/// `BigInt` for 64-bit integers that fall outside JS's safe-integer range
+/// instead of throwing.
+///
+/// The DisplayCatalog API legitimately returns counts like
+/// `RatingCount: 1407657960666562560` for popular products — well above
+/// `Number.MAX_SAFE_INTEGER` (2⁵³ − 1). The default `to_value` would throw
+/// `"… can't be represented as a JavaScript number"`; this helper renders
+/// them as `BigInt` (`1407657960666562560n`) so the value survives the
+/// crossing.
+///
+/// Note for JS consumers: with this setting, *every* `i64`/`u64` field is
+/// serialized as `BigInt`, even small values. If you `JSON.stringify` the
+/// result, install a BigInt-aware replacer first:
+///
+/// ```js
+/// JSON.stringify(obj, (_k, v) => typeof v === 'bigint' ? v.toString() : v);
+/// ```
+fn to_js<T: Serialize + ?Sized>(value: &T) -> Result<JsValue, serde_wasm_bindgen::Error> {
+    let serializer = Serializer::new().serialize_large_number_types_as_bigints(true);
+    value.serialize(&serializer)
 }
 
 fn parse_enum<T: serde::de::DeserializeOwned>(label: &str, raw: &str) -> Result<T, JsError> {
@@ -168,6 +192,17 @@ pub fn wasm_init() {
 #[wasm_bindgen(typescript_custom_section)]
 const TS_APPEND_CONTENT: &'static str = r#"
 
+/* IMPORTANT — BigInt for large numbers
+ * ------------------------------------
+ * Microsoft Store occasionally returns 64-bit integers that exceed
+ * `Number.MAX_SAFE_INTEGER` (2⁵³ − 1), e.g. usage counters such as
+ * `ratingCount`, `purchaseCount`, `playCount`. To keep precision, every
+ * 64-bit-integer field in this surface is emitted as a JS `bigint`. The
+ * declarations below mark those as `number | bigint | null`. To send the
+ * value back through `JSON.stringify`, install a BigInt-aware replacer:
+ *     JSON.stringify(v, (_k, v) => typeof v === 'bigint' ? v.toString() : v);
+ */
+
 /** Two-letter ISO 3166-1 alpha-2 market code (e.g. "US", "JP"). */
 export type MarketCode = string;
 
@@ -251,8 +286,12 @@ export interface PackageInstance {
     updateId: string;
     /** Download size in bytes. FE3-reported first, falling back to the
      *  DisplayCatalog `MaxDownloadSizeInBytes` field. `null` only for
-     *  framework packages that DCat doesn't list a size for. */
-    packageSize: number | null;
+     *  framework packages that DCat doesn't list a size for.
+     *
+     *  Note: i64 on the wire. Renders as `bigint` since 0.1.7-fix-1 so values
+     *  above `Number.MAX_SAFE_INTEGER` survive the crossing. Cast with
+     *  `Number(packageSize)` if you need a JS Number. */
+    packageSize: number | bigint | null;
     /** FE3's raw `<File FileName="...">` value — typically `<guid>.<ext>`
      *  (e.g. "1b599478-…-f8c4de1670d4.appxbundle"). Useful for low-level
      *  matching against the FE3 SOAP response. */
@@ -408,7 +447,7 @@ export interface Image {
 /// camelCase enum value (`"appX"`, `"uap"`, `"xap"`, or `"unknown"`).
 #[wasm_bindgen(js_name = stringToPackageType)]
 pub fn string_to_package_type_js(raw: &str) -> Result<JsValue, JsError> {
-    to_value(&h::string_to_package_type(raw)).map_err(js_err)
+    to_js(&h::string_to_package_type(raw)).map_err(js_err)
 }
 
 /// Returns the base URL for a DisplayCatalog product endpoint.
@@ -442,7 +481,7 @@ pub fn list_markets_js() -> Result<JsValue, JsError> {
             english_name: m.english_name(),
         })
         .collect();
-    to_value(&entries).map_err(js_err)
+    to_js(&entries).map_err(js_err)
 }
 
 /// Returns every ISO 639-1 alpha-2 language code with its English name.
@@ -455,7 +494,7 @@ pub fn list_languages_js() -> Result<JsValue, JsError> {
             english_name: l.english_name(),
         })
         .collect();
-    to_value(&entries).map_err(js_err)
+    to_js(&entries).map_err(js_err)
 }
 
 /// Returns every Microsoft Store BCP-47 language tag (e.g. `en-US`,
@@ -469,7 +508,7 @@ pub fn list_language_tags_js() -> Result<JsValue, JsError> {
             english_name: t.english_name(),
         })
         .collect();
-    to_value(&entries).map_err(js_err)
+    to_js(&entries).map_err(js_err)
 }
 
 /// Validate a market code and return its canonical form + English name.
@@ -477,7 +516,7 @@ pub fn list_language_tags_js() -> Result<JsValue, JsError> {
 #[wasm_bindgen(js_name = parseMarket, unchecked_return_type = "CodeEntry")]
 pub fn parse_market_js(code: &str) -> Result<JsValue, JsError> {
     let m = parse_market(code)?;
-    to_value(&CodeEntry {
+    to_js(&CodeEntry {
         code: m.as_str(),
         english_name: m.english_name(),
     })
@@ -489,7 +528,7 @@ pub fn parse_market_js(code: &str) -> Result<JsValue, JsError> {
 #[wasm_bindgen(js_name = parseLanguage, unchecked_return_type = "CodeEntry")]
 pub fn parse_language_js(code: &str) -> Result<JsValue, JsError> {
     let l = parse_lang(code)?;
-    to_value(&CodeEntry {
+    to_js(&CodeEntry {
         code: l.as_str(),
         english_name: l.english_name(),
     })
@@ -502,7 +541,7 @@ pub fn parse_language_js(code: &str) -> Result<JsValue, JsError> {
 #[wasm_bindgen(js_name = parseLanguageTag, unchecked_return_type = "CodeEntry")]
 pub fn parse_language_tag_js(tag: &str) -> Result<JsValue, JsError> {
     let t = LanguageTag::from_str(tag).map_err(|e| JsError::new(&e))?;
-    to_value(&CodeEntry {
+    to_js(&CodeEntry {
         code: t.as_str(),
         english_name: t.english_name(),
     })
@@ -610,7 +649,7 @@ impl LocaleJs {
     /// Returns the locale as a plain object: `{market, language, includeNeutral}`.
     #[wasm_bindgen(js_name = toJSON, unchecked_return_type = "LocaleJson")]
     pub fn to_json(&self) -> Result<JsValue, JsError> {
-        to_value(&self.inner).map_err(js_err)
+        to_js(&self.inner).map_err(js_err)
     }
 }
 
@@ -673,7 +712,7 @@ impl DisplayCatalogHandlerJs {
             return;
         };
         let cb = move |event: ProgressEvent| {
-            let val = to_value(&event).unwrap_or(JsValue::NULL);
+            let val = to_js(&event).unwrap_or(JsValue::NULL);
             let _ = func.call1(&JsValue::NULL, &val);
         };
         self.inner.set_progress_callback(Box::new(cb));
@@ -701,7 +740,7 @@ impl DisplayCatalogHandlerJs {
             .query_dcat_with_cancel(&id, t, auth_token.as_deref(), cancel)
             .await
             .map_err(store_err)?;
-        Ok(to_value(&self.inner.product_listing).map_err(js_err)?)
+        Ok(to_js(&self.inner.product_listing).map_err(js_err)?)
     }
 
     /// Resolve the direct download URLs for the currently-loaded product.
@@ -728,7 +767,7 @@ impl DisplayCatalogHandlerJs {
             .get_packages_for_product_with_cancel(msa_token.as_deref(), cancel)
             .await
             .map_err(store_err)?;
-        Ok(to_value(&packages).map_err(js_err)?)
+        Ok(to_js(&packages).map_err(js_err)?)
     }
 
     /// Search DisplayCatalog for the given query string. Pass an `AbortSignal`
@@ -751,7 +790,7 @@ impl DisplayCatalogHandlerJs {
             .search_dcat_with_cancel(&query, df, cancel)
             .await
             .map_err(store_err)?;
-        Ok(to_value(&result).map_err(js_err)?)
+        Ok(to_js(&result).map_err(js_err)?)
     }
 
     /// Same as `searchDcat` but skips the first `skipCount` results (pages of
@@ -775,7 +814,7 @@ impl DisplayCatalogHandlerJs {
             .search_dcat_paged_with_cancel(&query, df, skip_count, cancel)
             .await
             .map_err(store_err)?;
-        Ok(to_value(&result).map_err(js_err)?)
+        Ok(to_js(&result).map_err(js_err)?)
     }
 
     // -- state accessors ---------------------------------------------------
@@ -787,27 +826,27 @@ impl DisplayCatalogHandlerJs {
 
     #[wasm_bindgen(getter, js_name = productListing, unchecked_return_type = "DisplayCatalogModel | null")]
     pub fn product_listing(&self) -> Result<JsValue, JsError> {
-        to_value(&self.inner.product_listing).map_err(js_err)
+        to_js(&self.inner.product_listing).map_err(js_err)
     }
 
     #[wasm_bindgen(getter, js_name = searchResult, unchecked_return_type = "DCatSearch | null")]
     pub fn search_result(&self) -> Result<JsValue, JsError> {
-        to_value(&self.inner.search_result).map_err(js_err)
+        to_js(&self.inner.search_result).map_err(js_err)
     }
 
     #[wasm_bindgen(getter, js_name = selectedEndpoint, unchecked_return_type = "DCatEndpointStr")]
     pub fn selected_endpoint(&self) -> Result<JsValue, JsError> {
-        to_value(&self.inner.selected_endpoint).map_err(js_err)
+        to_js(&self.inner.selected_endpoint).map_err(js_err)
     }
 
     #[wasm_bindgen(getter, js_name = selectedLocale, unchecked_return_type = "LocaleJson")]
     pub fn selected_locale(&self) -> Result<JsValue, JsError> {
-        to_value(&self.inner.selected_locale).map_err(js_err)
+        to_js(&self.inner.selected_locale).map_err(js_err)
     }
 
     #[wasm_bindgen(getter)]
     pub fn result(&self) -> Result<JsValue, JsError> {
-        to_value(&self.inner.result).map_err(js_err)
+        to_js(&self.inner.result).map_err(js_err)
     }
 
     #[wasm_bindgen(getter)]
@@ -853,40 +892,40 @@ impl DisplayCatalogHandlerJs {
     /// is listed (e.g. the product is free or unavailable in the locale).
     #[wasm_bindgen(getter, unchecked_return_type = "Price | null")]
     pub fn price(&self) -> Result<JsValue, JsError> {
-        to_value(&self.inner.price()).map_err(js_err)
+        to_js(&self.inner.price()).map_err(js_err)
     }
 
     /// Every [`Price`] across all availabilities (an app can have multiple
     /// for different markets / channels).
     #[wasm_bindgen(getter, unchecked_return_type = "Price[]")]
     pub fn prices(&self) -> Result<JsValue, JsError> {
-        to_value(&self.inner.prices()).map_err(js_err)
+        to_js(&self.inner.prices()).map_err(js_err)
     }
 
     /// Packages from the first SKU's properties. For the resolved download
     /// URLs, use `getPackagesForProduct` instead.
     #[wasm_bindgen(getter, unchecked_return_type = "Package[]")]
     pub fn packages(&self) -> Result<JsValue, JsError> {
-        to_value(self.inner.packages()).map_err(js_err)
+        to_js(self.inner.packages()).map_err(js_err)
     }
 
     /// All `Availability` entries flattened across the product's SKUs.
     #[wasm_bindgen(getter, unchecked_return_type = "Availability[]")]
     pub fn availabilities(&self) -> Result<JsValue, JsError> {
-        to_value(&self.inner.availabilities()).map_err(js_err)
+        to_js(&self.inner.availabilities()).map_err(js_err)
     }
 
     /// All products from the most recent query (single or batch).
     #[wasm_bindgen(getter, unchecked_return_type = "ProductLike[]")]
     pub fn products(&self) -> Result<JsValue, JsError> {
-        to_value(self.inner.products()).map_err(js_err)
+        to_js(self.inner.products()).map_err(js_err)
     }
 
     /// Images on the first localized property filtered by `purpose`
     /// (case-sensitive PascalCase, e.g. `"Logo"`, `"Tile"`, `"Screenshot"`).
     #[wasm_bindgen(js_name = imagesWithPurpose, unchecked_return_type = "Image[]")]
     pub fn images_with_purpose(&self, purpose: &str) -> Result<JsValue, JsError> {
-        to_value(&self.inner.images_with_purpose(purpose)).map_err(js_err)
+        to_js(&self.inner.images_with_purpose(purpose)).map_err(js_err)
     }
 
     // -- batch product query ----------------------------------------------
@@ -912,7 +951,7 @@ impl DisplayCatalogHandlerJs {
             .query_dcat_batch_with_cancel(&id_refs, auth_token.as_deref(), cancel)
             .await
             .map_err(store_err)?;
-        Ok(to_value(self.inner.products()).map_err(js_err)?)
+        Ok(to_js(self.inner.products()).map_err(js_err)?)
     }
 }
 
@@ -971,7 +1010,7 @@ impl Fe3HandlerJs {
             update_ids: Vec<String>,
             revision_ids: Vec<String>,
         }
-        Ok(to_value(&Ids {
+        Ok(to_js(&Ids {
             update_ids,
             revision_ids,
         })
@@ -984,7 +1023,7 @@ impl Fe3HandlerJs {
         let instances = FE3Handler::get_package_instances(&xml)
             .await
             .map_err(store_err)?;
-        Ok(to_value(&instances).map_err(js_err)?)
+        Ok(to_js(&instances).map_err(js_err)?)
     }
 
     /// Resolve direct download URLs for the given update + revision IDs.
@@ -1016,7 +1055,7 @@ impl Fe3HandlerJs {
             .into_iter()
             .map(|(url, size)| UrlEntry { url, size })
             .collect();
-        Ok(to_value(&mapped).map_err(js_err)?)
+        Ok(to_js(&mapped).map_err(js_err)?)
     }
 }
 
