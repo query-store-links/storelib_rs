@@ -55,6 +55,25 @@ const merged = {
     ],
 };
 
+// npm wants `repository.url` in `git+https://…/foo.git` form. wasm-pack
+// emits the bare `repository = "https://github.com/owner/repo"` from
+// Cargo.toml, which makes `npm publish` print a warning and auto-rewrite
+// the field. Do the rewrite here so the published manifest is clean.
+function normalizeRepoUrl(url) {
+    if (!url || typeof url !== 'string') return url;
+    if (url.startsWith('git+')) return url;
+    if (url.startsWith('http://') || url.startsWith('https://')) {
+        return 'git+' + (url.endsWith('.git') ? url : url + '.git');
+    }
+    return url;
+}
+if (typeof merged.repository === 'string') {
+    merged.repository = { type: 'git', url: normalizeRepoUrl(merged.repository) };
+} else if (merged.repository && typeof merged.repository === 'object') {
+    merged.repository.url = normalizeRepoUrl(merged.repository.url);
+    if (!merged.repository.type) merged.repository.type = 'git';
+}
+
 await fs.writeFile(
     join(pkgRoot, 'package.json'),
     JSON.stringify(merged, null, 2) + '\n',

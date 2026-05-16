@@ -59,4 +59,17 @@ jobs:
         shell: bash
         run: |
           cd pkg
-          npm publish --access public --provenance
+          version="$(node -p 'require("./package.json").version')"
+          if [[ "$version" == *-* ]]; then
+            # SemVer prerelease (anything after the first `-`). npm refuses
+            # to publish prereleases under the `latest` dist-tag, so use the
+            # first identifier of the prerelease label as the tag
+            # (`0.1.7-fix-1` → `fix`, `0.1.8-alpha.1` → `alpha`).
+            prerelease="${version#*-}"
+            tag="${prerelease%%[.-]*}"
+            [[ -z "$tag" ]] && tag="next"
+          else
+            tag="latest"
+          fi
+          echo "Publishing $version with dist-tag '$tag'"
+          npm publish --access public --provenance --tag "$tag"
