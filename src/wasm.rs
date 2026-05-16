@@ -13,7 +13,7 @@ use wasm_bindgen::prelude::*;
 
 use crate::error::StoreError;
 use crate::models::enums::{DCatEndpoint, DeviceFamily, IdentifierType};
-use crate::models::locale::{Lang, Locale, Market};
+use crate::models::locale::{Lang, LanguageTag, Locale, Market};
 use crate::services::display_catalog::DisplayCatalogHandler;
 use crate::services::fe3::FE3Handler;
 use crate::utilities::helpers as h;
@@ -89,6 +89,90 @@ pub fn endpoint_to_base_url_js(endpoint: &str) -> Result<String, JsError> {
 pub fn endpoint_to_search_url_js(endpoint: &str) -> Result<String, JsError> {
     let e = parse_endpoint(endpoint)?;
     Ok(h::endpoint_to_search_url(&e).to_string())
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CodeEntry {
+    code: &'static str,
+    english_name: &'static str,
+}
+
+/// Returns every ISO 3166-1 alpha-2 market code with its English name.
+#[wasm_bindgen(js_name = listMarkets)]
+pub fn list_markets_js() -> Result<JsValue, JsError> {
+    let entries: Vec<CodeEntry> = Market::all()
+        .iter()
+        .map(|m| CodeEntry {
+            code: m.as_str(),
+            english_name: m.english_name(),
+        })
+        .collect();
+    to_value(&entries).map_err(js_err)
+}
+
+/// Returns every ISO 639-1 alpha-2 language code with its English name.
+#[wasm_bindgen(js_name = listLanguages)]
+pub fn list_languages_js() -> Result<JsValue, JsError> {
+    let entries: Vec<CodeEntry> = Lang::all()
+        .iter()
+        .map(|l| CodeEntry {
+            code: l.as_str(),
+            english_name: l.english_name(),
+        })
+        .collect();
+    to_value(&entries).map_err(js_err)
+}
+
+/// Returns every Microsoft Store BCP-47 language tag (e.g. `en-US`,
+/// `zh-Hant`, `sr-Cyrl-RS`) with its English name.
+#[wasm_bindgen(js_name = listLanguageTags)]
+pub fn list_language_tags_js() -> Result<JsValue, JsError> {
+    let entries: Vec<CodeEntry> = LanguageTag::all()
+        .iter()
+        .map(|t| CodeEntry {
+            code: t.as_str(),
+            english_name: t.english_name(),
+        })
+        .collect();
+    to_value(&entries).map_err(js_err)
+}
+
+/// Validate a market code and return its canonical form + English name.
+/// Throws when the code isn't a known ISO 3166-1 alpha-2 market.
+#[wasm_bindgen(js_name = parseMarket)]
+pub fn parse_market_js(code: &str) -> Result<JsValue, JsError> {
+    let m = parse_market(code)?;
+    to_value(&CodeEntry {
+        code: m.as_str(),
+        english_name: m.english_name(),
+    })
+    .map_err(js_err)
+}
+
+/// Validate a language code and return its canonical form + English name.
+/// Throws when the code isn't a known ISO 639-1 alpha-2 language.
+#[wasm_bindgen(js_name = parseLanguage)]
+pub fn parse_language_js(code: &str) -> Result<JsValue, JsError> {
+    let l = parse_lang(code)?;
+    to_value(&CodeEntry {
+        code: l.as_str(),
+        english_name: l.english_name(),
+    })
+    .map_err(js_err)
+}
+
+/// Validate a BCP-47 language tag against the Microsoft Store list and return
+/// its canonical form (e.g. `"en-us"` → `"en-US"`) + English name. Throws
+/// when the tag isn't accepted by the Store.
+#[wasm_bindgen(js_name = parseLanguageTag)]
+pub fn parse_language_tag_js(tag: &str) -> Result<JsValue, JsError> {
+    let t = LanguageTag::from_str(tag).map_err(|e| JsError::new(&e))?;
+    to_value(&CodeEntry {
+        code: t.as_str(),
+        english_name: t.english_name(),
+    })
+    .map_err(js_err)
 }
 
 /// Build a full DisplayCatalog request URL from its components.

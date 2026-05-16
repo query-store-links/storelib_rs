@@ -7,7 +7,7 @@ mod iso_codes {
     include!("iso_codes.rs");
 }
 
-pub use iso_codes::{Lang, Market};
+pub use iso_codes::{Lang, LanguageTag, Market};
 
 /// Combined locale used when forming DisplayCatalog request URLs.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -102,11 +102,25 @@ mod tests {
     }
 
     #[test]
+    fn language_tag_roundtrip() {
+        assert_eq!(LanguageTag::EnUs.as_str(), "en-US");
+        assert_eq!(LanguageTag::ZhHant.as_str(), "zh-Hant");
+        assert_eq!(LanguageTag::SrCyrlRs.as_str(), "sr-Cyrl-RS");
+        assert_eq!(LanguageTag::CaEsValencia.as_str(), "ca-ES-valencia");
+        assert_eq!(LanguageTag::from_str("en-us").unwrap(), LanguageTag::EnUs);
+        assert_eq!(
+            LanguageTag::from_str("ZH-HANT").unwrap(),
+            LanguageTag::ZhHant,
+        );
+        assert!(LanguageTag::from_str("xx-YY").is_err());
+    }
+
+    #[test]
     fn english_names() {
-        // Names come straight from the ISO source data — the parenthetical
-        // suffix on some country names (e.g. "(the)") is part of the standard.
-        assert_eq!(Market::Us.english_name(), "United States of America (the)");
+        assert_eq!(Market::Us.english_name(), "United States");
         assert_eq!(Lang::En.english_name(), "English");
+        assert_eq!(LanguageTag::EnUs.english_name(), "English");
+        assert_eq!(LanguageTag::ZhHant.english_name(), "Chinese (Traditional)",);
     }
 
     #[test]

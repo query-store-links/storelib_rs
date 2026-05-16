@@ -43,7 +43,7 @@ pub use models::enums::{
     ProductKind,
 };
 pub use models::fe3::{ApplicabilityBlob, ContentTargetPlatform, PackageInstance};
-pub use models::locale::{Lang, Locale, Market};
+pub use models::locale::{Lang, LanguageTag, Locale, Market};
 pub use models::search::{DCatSearch, SearchResult};
 
 // services
