@@ -47,7 +47,7 @@ pub use models::locale::{Lang, LanguageTag, Locale, Market};
 pub use models::search::{DCatSearch, SearchResult};
 
 // services
-pub use services::display_catalog::DisplayCatalogHandler;
+pub use services::display_catalog::{DisplayCatalogHandler, ProgressCallback, ProgressEvent};
 pub use services::fe3::FE3Handler;
 
 // utilities

@@ -25,7 +25,7 @@ where
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all(serialize = "camelCase", deserialize = "PascalCase"))]
 pub struct DisplayCatalogModel {
     pub product: Option<Product>,
     pub big_ids: Option<Vec<String>>,
@@ -39,14 +39,14 @@ pub struct DisplayCatalogModel {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all(serialize = "camelCase", deserialize = "PascalCase"))]
 pub struct Product {
     pub last_modified_date: Option<String>,
     pub localized_properties: Option<Vec<ProductLocalizedProperty>>,
     pub market_properties: Option<Vec<ProductMarketProperty>>,
-    #[serde(rename = "ProductASchema")]
+    #[serde(rename(serialize = "productASchema", deserialize = "ProductASchema"))]
     pub product_a_schema: Option<String>,
-    #[serde(rename = "ProductBSchema")]
+    #[serde(rename(serialize = "productBSchema", deserialize = "ProductBSchema"))]
     pub product_b_schema: Option<String>,
     pub properties: Option<ProductProperties>,
     pub alternate_ids: Option<Vec<AlternateId>>,
@@ -56,7 +56,7 @@ pub struct Product {
     pub preferred_sku_id: Option<String>,
     pub product_type: Option<String>,
     pub validation_data: Option<ValidationData>,
-    #[serde(rename = "SandboxId")]
+    #[serde(rename(serialize = "sandboxId", deserialize = "SandboxId"))]
     pub sandbox_id: Option<String>,
     pub is_sandboxed_product: Option<bool>,
     pub merchandizing_tags: Option<Vec<serde_json::Value>>,
@@ -72,7 +72,7 @@ pub struct Product {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all(serialize = "camelCase", deserialize = "PascalCase"))]
 pub struct ValidationData {
     pub passed_validation: Option<bool>,
     pub revision_id: Option<String>,
@@ -80,7 +80,7 @@ pub struct ValidationData {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all(serialize = "camelCase", deserialize = "PascalCase"))]
 pub struct ProductProperties {
     pub attributes: Option<Vec<serde_json::Value>>,
     pub can_install_to_sd_card: Option<bool>,
@@ -98,7 +98,7 @@ pub struct ProductProperties {
     pub publisher_certificate_name: Option<String>,
     pub publisher_id: Option<String>,
     pub xbox_live_tier: Option<serde_json::Value>,
-    #[serde(rename = "XboxXPA")]
+    #[serde(rename(serialize = "xboxXPA", deserialize = "XboxXPA"))]
     pub xbox_xpa: Option<serde_json::Value>,
     pub ownership_type: Option<serde_json::Value>,
     pub pdp_background_color: Option<String>,
@@ -109,7 +109,7 @@ pub struct ProductProperties {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all(serialize = "camelCase", deserialize = "PascalCase"))]
 pub struct ProductMarketProperty {
     pub original_release_date: Option<String>,
     pub original_release_date_friendly_name: Option<String>,
@@ -122,7 +122,7 @@ pub struct ProductMarketProperty {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all(serialize = "camelCase", deserialize = "PascalCase"))]
 pub struct UsageDatum {
     pub average_rating: Option<f64>,
     pub aggregate_time_span: Option<String>,
@@ -139,7 +139,7 @@ pub struct UsageDatum {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all(serialize = "camelCase", deserialize = "PascalCase"))]
 pub struct ContentRating {
     pub rating_system: Option<String>,
     pub rating_id: Option<String>,
@@ -149,7 +149,7 @@ pub struct ContentRating {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all(serialize = "camelCase", deserialize = "PascalCase"))]
 pub struct ProductLocalizedProperty {
     pub developer_name: Option<String>,
     pub display_platform_properties: Option<serde_json::Value>,
@@ -174,14 +174,14 @@ pub struct ProductLocalizedProperty {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all(serialize = "camelCase", deserialize = "PascalCase"))]
 pub struct SearchTitle {
     pub search_title_string: Option<String>,
     pub search_title_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all(serialize = "camelCase", deserialize = "PascalCase"))]
 pub struct Image {
     pub background_color: Option<String>,
     pub caption: Option<String>,
@@ -196,7 +196,7 @@ pub struct Image {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all(serialize = "camelCase", deserialize = "PascalCase"))]
 pub struct AlternateId {
     pub id_type: Option<String>,
     pub value: Option<String>,
@@ -207,22 +207,22 @@ pub struct AlternateId {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all(serialize = "camelCase", deserialize = "PascalCase"))]
 pub struct DisplaySkuAvailability {
     pub sku: Option<Sku>,
     pub availabilities: Option<Vec<Availability>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all(serialize = "camelCase", deserialize = "PascalCase"))]
 pub struct Sku {
     pub last_modified_date: Option<String>,
     pub localized_properties: Option<Vec<SkuLocalizedProperty>>,
     pub market_properties: Option<Vec<SkuMarketProperty>>,
     pub properties: Option<SkuProperties>,
-    #[serde(rename = "SkuASchema")]
+    #[serde(rename(serialize = "skuASchema", deserialize = "SkuASchema"))]
     pub sku_a_schema: Option<String>,
-    #[serde(rename = "SkuBSchema")]
+    #[serde(rename(serialize = "skuBSchema", deserialize = "SkuBSchema"))]
     pub sku_b_schema: Option<String>,
     pub sku_id: Option<String>,
     pub sku_type: Option<String>,
@@ -231,7 +231,7 @@ pub struct Sku {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all(serialize = "camelCase", deserialize = "PascalCase"))]
 pub struct SkuProperties {
     pub early_adopter_enrollment_url: Option<serde_json::Value>,
     pub fulfillment_data: Option<FulfillmentData>,
@@ -245,7 +245,7 @@ pub struct SkuProperties {
     pub packages: Option<Vec<Package>>,
     pub version_string: Option<String>,
     pub visible_to_b2b_service_ids: Option<Vec<serde_json::Value>>,
-    #[serde(rename = "XboxXPA")]
+    #[serde(rename(serialize = "xboxXPA", deserialize = "XboxXPA"))]
     pub xbox_xpa: Option<bool>,
     pub bundled_skus: Option<Vec<serde_json::Value>>,
     pub is_repurchasable: Option<bool>,
@@ -258,12 +258,12 @@ pub struct SkuProperties {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all(serialize = "camelCase", deserialize = "PascalCase"))]
 pub struct FulfillmentData {
     pub product_id: Option<String>,
-    #[serde(rename = "WuBundleId")]
+    #[serde(rename(serialize = "wuBundleId", deserialize = "WuBundleId"))]
     pub wu_bundle_id: Option<String>,
-    #[serde(rename = "WuCategoryId")]
+    #[serde(rename(serialize = "wuCategoryId", deserialize = "WuCategoryId"))]
     pub wu_category_id: Option<String>,
     pub package_family_name: Option<String>,
     pub sku_id: Option<String>,
@@ -271,7 +271,7 @@ pub struct FulfillmentData {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all(serialize = "camelCase", deserialize = "PascalCase"))]
 pub struct HardwareProperties {
     pub minimum_hardware: Option<Vec<serde_json::Value>>,
     pub recommended_hardware: Option<Vec<String>>,
@@ -282,7 +282,7 @@ pub struct HardwareProperties {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all(serialize = "camelCase", deserialize = "PascalCase"))]
 pub struct Package {
     pub applications: Option<Vec<Application>>,
     pub architectures: Option<Vec<String>>,
@@ -318,14 +318,14 @@ pub struct Package {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all(serialize = "camelCase", deserialize = "PascalCase"))]
 pub struct PackageDownloadUri {
     pub uri: Option<String>,
     pub rank: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all(serialize = "camelCase", deserialize = "PascalCase"))]
 pub struct PlatformDependency {
     // The API returns these as either integers or quoted strings (e.g. "0").
     pub max_tested: Option<serde_json::Value>,
@@ -334,7 +334,7 @@ pub struct PlatformDependency {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all(serialize = "camelCase", deserialize = "PascalCase"))]
 pub struct Application {
     pub application_id: Option<String>,
     pub declaration_order: Option<i64>,
@@ -342,7 +342,7 @@ pub struct Application {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all(serialize = "camelCase", deserialize = "PascalCase"))]
 pub struct SkuMarketProperty {
     pub first_available_date: Option<String>,
     pub supported_languages: Option<Vec<String>>,
@@ -351,7 +351,7 @@ pub struct SkuMarketProperty {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all(serialize = "camelCase", deserialize = "PascalCase"))]
 pub struct SkuLocalizedProperty {
     pub contributors: Option<Vec<serde_json::Value>>,
     pub features: Option<Vec<serde_json::Value>>,
@@ -372,7 +372,7 @@ pub struct SkuLocalizedProperty {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all(serialize = "camelCase", deserialize = "PascalCase"))]
 pub struct LegalText {
     pub additional_license_terms: Option<String>,
     pub copyright: Option<String>,
@@ -388,12 +388,12 @@ pub struct LegalText {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all(serialize = "camelCase", deserialize = "PascalCase"))]
 pub struct Availability {
     pub actions: Option<Vec<String>>,
-    #[serde(rename = "AvailabilityASchema")]
+    #[serde(rename(serialize = "availabilityASchema", deserialize = "AvailabilityASchema"))]
     pub availability_a_schema: Option<String>,
-    #[serde(rename = "AvailabilityBSchema")]
+    #[serde(rename(serialize = "availabilityBSchema", deserialize = "AvailabilityBSchema"))]
     pub availability_b_schema: Option<String>,
     pub availability_id: Option<String>,
     pub conditions: Option<Conditions>,
@@ -407,42 +407,42 @@ pub struct Availability {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all(serialize = "camelCase", deserialize = "PascalCase"))]
 pub struct AvailabilityProperties {
     pub original_release_date: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all(serialize = "camelCase", deserialize = "PascalCase"))]
 pub struct OrderManagementData {
     pub granted_entitlement_keys: Option<Vec<serde_json::Value>>,
-    #[serde(rename = "PIFilter")]
+    #[serde(rename(serialize = "piFilter", deserialize = "PIFilter"))]
     pub pi_filter: Option<PiFilter>,
     pub price: Option<Price>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all(serialize = "camelCase", deserialize = "PascalCase"))]
 pub struct Price {
     pub currency_code: Option<String>,
-    #[serde(rename = "IsPIRequired")]
+    #[serde(rename(serialize = "isPIRequired", deserialize = "IsPIRequired"))]
     pub is_pi_required: Option<bool>,
     pub list_price: Option<f64>,
-    #[serde(rename = "MSRP")]
+    #[serde(rename(serialize = "msrp", deserialize = "MSRP"))]
     pub msrp: Option<f64>,
     pub tax_type: Option<String>,
     pub wholesale_currency_code: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all(serialize = "camelCase", deserialize = "PascalCase"))]
 pub struct PiFilter {
     pub exclusion_properties: Option<Vec<serde_json::Value>>,
     pub inclusion_properties: Option<Vec<serde_json::Value>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all(serialize = "camelCase", deserialize = "PascalCase"))]
 pub struct Conditions {
     pub client_conditions: Option<ClientConditions>,
     pub end_date: Option<String>,
@@ -451,13 +451,13 @@ pub struct Conditions {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all(serialize = "camelCase", deserialize = "PascalCase"))]
 pub struct ClientConditions {
     pub allowed_platforms: Option<Vec<AllowedPlatform>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all(serialize = "camelCase", deserialize = "PascalCase"))]
 pub struct AllowedPlatform {
     // The API returns these as either integers or quoted strings (e.g. "0").
     pub max_version: Option<serde_json::Value>,
@@ -517,10 +517,152 @@ mod tests {
     // -- DisplayCatalogModel round-trip ---------------------------------------
 
     #[test]
+    fn product_serializes_as_camel_case_while_deserializing_pascal_case() {
+        // PascalCase in (matches what MS Store sends), camelCase out (what JS expects).
+        let json = r#"{"Product":{"LocalizedProperties":[{"ProductTitle":"Hi"}],"ProductASchema":"v1","SandboxId":"sb"},"Products":[]}"#;
+        let m: DisplayCatalogModel = serde_json::from_str(json).unwrap();
+        let out = serde_json::to_string(&m).unwrap();
+        assert!(out.contains("\"product\":"), "got: {out}");
+        assert!(out.contains("\"products\":"), "got: {out}");
+        assert!(out.contains("\"localizedProperties\":"), "got: {out}");
+        assert!(out.contains("\"productTitle\":"), "got: {out}");
+        assert!(out.contains("\"productASchema\":"), "got: {out}");
+        assert!(out.contains("\"sandboxId\":"), "got: {out}");
+        assert!(!out.contains("\"Product\""), "found PascalCase in: {out}");
+    }
+
+    #[test]
+    fn price_acronyms_emit_camel_case() {
+        let json = r#"{"CurrencyCode":"USD","IsPIRequired":true,"MSRP":9.99,"ListPrice":4.99}"#;
+        let p: Price = serde_json::from_str(json).unwrap();
+        let out = serde_json::to_string(&p).unwrap();
+        assert!(out.contains("\"isPIRequired\":true"), "got: {out}");
+        assert!(out.contains("\"msrp\":9.99"), "got: {out}");
+        assert!(out.contains("\"currencyCode\":"), "got: {out}");
+        assert!(out.contains("\"listPrice\":"), "got: {out}");
+    }
+
+    #[test]
     fn display_catalog_model_deserializes_minimal_json() {
         let json = r#"{"Product":null,"BigIds":null,"HasMorePages":false,"Products":[],"TotalResultCount":0}"#;
         let m: DisplayCatalogModel = serde_json::from_str(json).unwrap();
         assert!(!m.has_more_pages.unwrap_or(true));
         assert_eq!(m.total_result_count, Some(0));
+    }
+
+    #[test]
+    fn fulfillment_data_round_trip_wu_keys() {
+        // The MS Store wire form uses WuCategoryId / WuBundleId; JS sees camelCase.
+        let json = r#"{"ProductId":"9NBLGGH4R315","WuBundleId":"abc-bundle","WuCategoryId":"def-cat","PackageFamilyName":"X.Y_1234"}"#;
+        let fd: FulfillmentData = serde_json::from_str(json).unwrap();
+        assert_eq!(fd.wu_category_id.as_deref(), Some("def-cat"));
+        assert_eq!(fd.wu_bundle_id.as_deref(), Some("abc-bundle"));
+
+        let out = serde_json::to_string(&fd).unwrap();
+        assert!(out.contains("\"wuCategoryId\":\"def-cat\""), "got: {out}");
+        assert!(out.contains("\"wuBundleId\":\"abc-bundle\""), "got: {out}");
+        assert!(out.contains("\"productId\":\"9NBLGGH4R315\""), "got: {out}");
+        assert!(
+            out.contains("\"packageFamilyName\":\"X.Y_1234\""),
+            "got: {out}"
+        );
+        // Old PascalCase keys must not leak through.
+        assert!(!out.contains("\"WuCategoryId\""), "got: {out}");
+    }
+
+    #[test]
+    fn sku_round_trip_a_b_schemas() {
+        let json = r#"{"SkuASchema":"A1","SkuBSchema":"B1","SkuId":"0001"}"#;
+        let sku: Sku = serde_json::from_str(json).unwrap();
+        assert_eq!(sku.sku_a_schema.as_deref(), Some("A1"));
+        assert_eq!(sku.sku_b_schema.as_deref(), Some("B1"));
+
+        let out = serde_json::to_string(&sku).unwrap();
+        assert!(out.contains("\"skuASchema\":\"A1\""), "got: {out}");
+        assert!(out.contains("\"skuBSchema\":\"B1\""), "got: {out}");
+        assert!(out.contains("\"skuId\":\"0001\""), "got: {out}");
+    }
+
+    #[test]
+    fn package_max_download_size_round_trip() {
+        // Package.max_download_size_in_bytes powers PackageInstance.packageSize
+        // when FE3 doesn't report a size — important enough to lock in.
+        let json = r#"{"PackageFullName":"X.Y_1.0.0.0_x64__abcd","MaxDownloadSizeInBytes":123456789,"MaxInstallSizeInBytes":"234567890"}"#;
+        let pkg: Package = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            pkg.package_full_name.as_deref(),
+            Some("X.Y_1.0.0.0_x64__abcd")
+        );
+        assert_eq!(pkg.max_download_size_in_bytes, Some(123_456_789));
+        // de_str_or_i64 converts "234567890" → 234567890
+        assert_eq!(pkg.max_install_size_in_bytes, Some(234_567_890));
+
+        let out = serde_json::to_string(&pkg).unwrap();
+        assert!(
+            out.contains("\"maxDownloadSizeInBytes\":123456789"),
+            "got: {out}",
+        );
+        assert!(out.contains("\"packageFullName\":"), "got: {out}");
+    }
+
+    #[test]
+    fn order_management_data_pi_filter_round_trip() {
+        let json = r#"{"PIFilter":{"InclusionProperties":[],"ExclusionProperties":[]}}"#;
+        let omd: OrderManagementData = serde_json::from_str(json).unwrap();
+        assert!(omd.pi_filter.is_some());
+
+        let out = serde_json::to_string(&omd).unwrap();
+        assert!(out.contains("\"piFilter\":"), "got: {out}");
+        assert!(!out.contains("\"PIFilter\""), "got: {out}");
+    }
+
+    #[test]
+    fn product_with_nested_sku_serializes_consistent_case() {
+        // End-to-end: PascalCase in, camelCase out, multiple nesting levels.
+        let json = r#"{
+            "LastModifiedDate":"2024-01-01",
+            "ProductASchema":"sa-1",
+            "DisplaySkuAvailabilities":[{
+                "Sku":{
+                    "SkuId":"0001",
+                    "Properties":{
+                        "FulfillmentData":{"WuCategoryId":"cat-123"},
+                        "Packages":[{"PackageFullName":"X.Y","MaxDownloadSizeInBytes":42}]
+                    }
+                }
+            }]
+        }"#;
+        let p: Product = serde_json::from_str(json).unwrap();
+        let dsa = p.display_sku_availabilities.as_deref().unwrap();
+        let sku = dsa[0].sku.as_ref().unwrap();
+        let props = sku.properties.as_ref().unwrap();
+        assert_eq!(
+            props
+                .fulfillment_data
+                .as_ref()
+                .unwrap()
+                .wu_category_id
+                .as_deref(),
+            Some("cat-123"),
+        );
+
+        let out = serde_json::to_string(&p).unwrap();
+        // Every nested level must be camelCase.
+        assert!(out.contains("\"displaySkuAvailabilities\":"), "got: {out}");
+        assert!(out.contains("\"sku\":"), "got: {out}");
+        assert!(out.contains("\"properties\":"), "got: {out}");
+        assert!(out.contains("\"fulfillmentData\":"), "got: {out}");
+        assert!(out.contains("\"wuCategoryId\":\"cat-123\""), "got: {out}");
+        assert!(out.contains("\"productASchema\":"), "got: {out}");
+        assert!(out.contains("\"maxDownloadSizeInBytes\":42"), "got: {out}");
+        // No leftover PascalCase keys at any level.
+        for bad in [
+            "\"DisplaySkuAvailabilities\"",
+            "\"Sku\"",
+            "\"WuCategoryId\"",
+            "\"ProductASchema\"",
+        ] {
+            assert!(!out.contains(bad), "leaked {bad} in: {out}");
+        }
     }
 }

@@ -17,8 +17,10 @@
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 
+use std::ffi::c_void;
+
 use crate::models::enums::{DeviceFamily, IdentifierType};
-use crate::services::display_catalog::DisplayCatalogHandler;
+use crate::services::display_catalog::{DisplayCatalogHandler, ProgressEvent};
 
 // ---------------------------------------------------------------------------
 // Error codes (mirrored in the C header)
@@ -32,6 +34,7 @@ pub const STORELIB_ERR_XML: i32 = -4;
 pub const STORELIB_ERR_NOT_FOUND: i32 = -5;
 pub const STORELIB_ERR_TIMEOUT: i32 = -6;
 pub const STORELIB_ERR_OTHER: i32 = -7;
+pub const STORELIB_ERR_CANCELLED: i32 = -8;
 
 fn err_code(e: &crate::error::StoreError) -> i32 {
     use crate::error::StoreError::*;
@@ -41,6 +44,7 @@ fn err_code(e: &crate::error::StoreError) -> i32 {
         Xml(_) => STORELIB_ERR_XML,
         NotFound => STORELIB_ERR_NOT_FOUND,
         TimedOut => STORELIB_ERR_TIMEOUT,
+        Cancelled => STORELIB_ERR_CANCELLED,
         Other(_) => STORELIB_ERR_OTHER,
     }
 }
@@ -323,6 +327,95 @@ pub unsafe extern "C" fn storelib_search_json(
             std::ptr::null_mut()
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Progress callback
+// ---------------------------------------------------------------------------
+
+/// C-compatible progress callback signature.
+///
+/// Fired during `storelib_query`, `storelib_packages_json`, and
+/// `storelib_search_json` at each phase boundary. `stage` and `message` are
+/// NUL-terminated UTF-8, valid only for the duration of the call. `has_current`
+/// and `has_total` are `1` when `current`/`total` carry a meaningful counter
+/// (e.g. "5 of 12 packages") and `0` otherwise. `user_data` is the opaque
+/// pointer passed to [`storelib_set_progress_callback`].
+pub type StorelibProgressCallback = extern "C" fn(
+    stage: *const c_char,
+    message: *const c_char,
+    has_current: i32,
+    current: u32,
+    has_total: i32,
+    total: u32,
+    user_data: *mut c_void,
+);
+
+/// Install a progress callback. Pass `NULL` as `callback` to detach.
+///
+/// `user_data` is opaque and is passed back to the callback on every event;
+/// it may be `NULL`. The callback is invoked from the Tokio runtime worker
+/// thread that drives the active async call, so it must be thread-safe.
+///
+/// # Safety
+/// `handle` must be a valid non-null pointer; `callback` must outlive any
+/// pending in-flight `storelib_*` call on this handle.
+#[no_mangle]
+pub unsafe extern "C" fn storelib_set_progress_callback(
+    handle: *mut StorelibHandle,
+    callback: Option<StorelibProgressCallback>,
+    user_data: *mut c_void,
+) -> i32 {
+    if handle.is_null() {
+        return STORELIB_ERR_NULL;
+    }
+    let h = &mut *handle;
+    match callback {
+        Some(cb) => {
+            // Carry user_data across the Send boundary as an integer; the
+            // closure casts it back to *mut c_void on entry. Function pointers
+            // are already Send + Sync.
+            let user_data_addr = user_data as usize;
+            h.handler
+                .set_progress_callback(Box::new(move |e: ProgressEvent| {
+                    let stage = CString::new(e.stage).unwrap_or_default();
+                    let message = CString::new(e.message).unwrap_or_default();
+                    let (has_c, cur) = match e.current {
+                        Some(v) => (1, v),
+                        None => (0, 0),
+                    };
+                    let (has_t, tot) = match e.total {
+                        Some(v) => (1, v),
+                        None => (0, 0),
+                    };
+                    (cb)(
+                        stage.as_ptr(),
+                        message.as_ptr(),
+                        has_c,
+                        cur,
+                        has_t,
+                        tot,
+                        user_data_addr as *mut c_void,
+                    );
+                }));
+        }
+        None => h.handler.clear_progress_callback(),
+    }
+    STORELIB_OK
+}
+
+/// Detach the progress callback (equivalent to passing `NULL` to
+/// [`storelib_set_progress_callback`]).
+///
+/// # Safety
+/// `handle` must be a valid non-null pointer.
+#[no_mangle]
+pub unsafe extern "C" fn storelib_clear_progress_callback(handle: *mut StorelibHandle) -> i32 {
+    if handle.is_null() {
+        return STORELIB_ERR_NULL;
+    }
+    (*handle).handler.clear_progress_callback();
+    STORELIB_OK
 }
 
 // ---------------------------------------------------------------------------

@@ -16,6 +16,9 @@ pub enum StoreError {
     #[error("Request timed out")]
     TimedOut,
 
+    #[error("Operation cancelled")]
+    Cancelled,
+
     #[error("{0}")]
     Other(String),
 }

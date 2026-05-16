@@ -72,6 +72,22 @@ const regions = registry
     }))
     .sort((a, b) => a.display.localeCompare(b.display));
 
+const langKeys = new Set(languages.map(l => l.key));
+const regionKeys = new Set(regions.map(r => r.display)); // already uppercase
+
+function subtagsOf(tag) {
+    const parts = tag.split('-');
+    const primary = parts[0].toLowerCase();
+    let region = null;
+    for (let i = 1; i < parts.length; i++) {
+        if (/^[A-Za-z]{2}$/.test(parts[i])) {
+            region = parts[i].toUpperCase();
+            break;
+        }
+    }
+    return { primary, region };
+}
+
 const storeCsv = await fs.readFile(join(repoRoot, 'data/ms-store-locales.csv'), 'utf8');
 const tags = storeCsv
     .split(/\r?\n/)
@@ -82,11 +98,14 @@ const tags = storeCsv
         const m = line.match(/^"([^"]+)"\s*,\s*"([^"]*)"/);
         if (!m) throw new Error(`unparsable CSV line: ${line}`);
         const [, tag, label] = m;
+        const { primary, region } = subtagsOf(tag);
         return {
             variant: pascalTag(tag),
             display: tag,
             key: tag.toLowerCase(),
             label,
+            lang: langKeys.has(primary) ? pascal(primary) : null,
+            market: region && regionKeys.has(region) ? pascal(region) : null,
         };
     })
     .sort((a, b) => a.key.localeCompare(b.key));
@@ -179,6 +198,34 @@ out.push('');
 emitEnum(out, 'Market', regions, 'A Microsoft Store market, identified by an ISO 3166-1 alpha-2 region subtag.');
 emitEnum(out, 'Lang', languages, 'A Microsoft Store UI language, identified by an ISO 639-1 alpha-2 subtag.');
 emitEnum(out, 'LanguageTag', tags, 'A BCP-47 language tag accepted by the Microsoft Store (e.g. `en-US`, `zh-Hant`, `sr-Cyrl-RS`).');
+
+// Tag → Lang / Market projections used by `Locale::from_tag`.
+out.push('impl LanguageTag {');
+out.push('    /// Primary language subtag, if it maps to an ISO 639-1 [`Lang`].');
+out.push('    /// Returns `None` for tags whose primary subtag is ISO 639-2 / 639-3');
+out.push('    /// (e.g. `chr-Cher`, `fil-PH`).');
+out.push('    pub fn lang(&self) -> Option<Lang> {');
+out.push('        match self {');
+for (const t of tags) {
+    const val = t.lang ? `Some(Lang::${t.lang})` : 'None';
+    out.push(`            LanguageTag::${t.variant} => ${val},`);
+}
+out.push('        }');
+out.push('    }');
+out.push('');
+out.push('    /// Region subtag, if present and resolvable to an ISO 3166-1 alpha-2 [`Market`].');
+out.push('    /// Returns `None` for tags with no region (`en`, `zh-Hant`) or with a');
+out.push('    /// UN M.49 numeric region (`en-053`, `es-419`).');
+out.push('    pub fn region(&self) -> Option<Market> {');
+out.push('        match self {');
+for (const t of tags) {
+    const val = t.market ? `Some(Market::${t.market})` : 'None';
+    out.push(`            LanguageTag::${t.variant} => ${val},`);
+}
+out.push('        }');
+out.push('    }');
+out.push('}');
+out.push('');
 
 const target = join(repoRoot, 'src/models/iso_codes.rs');
 await fs.writeFile(target, out.join('\n'));

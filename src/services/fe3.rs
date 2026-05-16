@@ -73,17 +73,21 @@ impl FE3Handler {
     // SyncUpdates
     // -----------------------------------------------------------------------
 
-    /// Fetch a FE3 cookie, then POST a `SyncUpdates` request for the given
-    /// `wu_category_id`.  Returns the HTML-decoded SOAP response body.
-    pub async fn sync_updates(
+    /// POST a `SyncUpdates` request using a pre-obtained `cookie`. Returns the
+    /// HTML-decoded SOAP response body.
+    ///
+    /// Most callers should use [`Self::sync_updates`], which fetches a cookie
+    /// internally. This variant is for callers that need to emit a progress
+    /// event between the two HTTP requests.
+    pub async fn sync_updates_with_cookie(
+        cookie: &str,
         wu_category_id: &str,
         msa_token: Option<&str>,
         client: &reqwest::Client,
     ) -> Result<String, StoreError> {
-        let cookie = Self::get_cookie(client).await?;
         let token = msa_token.unwrap_or(MSA_TOKEN);
         let body = WUID_REQUEST_XML
-            .replace("{0}", &cookie)
+            .replace("{0}", cookie)
             .replace("{1}", wu_category_id)
             .replace("{2}", token);
 
@@ -103,6 +107,17 @@ impl FE3Handler {
         let decoded = html_decode(&raw);
         trace!("FE3 SyncUpdates body:\n{decoded}");
         Ok(decoded)
+    }
+
+    /// Fetch a FE3 cookie, then POST a `SyncUpdates` request for the given
+    /// `wu_category_id`.  Returns the HTML-decoded SOAP response body.
+    pub async fn sync_updates(
+        wu_category_id: &str,
+        msa_token: Option<&str>,
+        client: &reqwest::Client,
+    ) -> Result<String, StoreError> {
+        let cookie = Self::get_cookie(client).await?;
+        Self::sync_updates_with_cookie(&cookie, wu_category_id, msa_token, client).await
     }
 
     // -----------------------------------------------------------------------

@@ -16,6 +16,7 @@
 #ifndef STORELIB_RS_H
 #define STORELIB_RS_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -32,14 +33,15 @@ typedef struct StorelibHandle StorelibHandle;
  * Return / error codes
  * ---------------------------------------------------------------------- */
 
-#define STORELIB_OK            0
-#define STORELIB_ERR_NULL     -1   /* null pointer argument                 */
-#define STORELIB_ERR_HTTP     -2   /* HTTP transport error                  */
-#define STORELIB_ERR_JSON     -3   /* JSON parse / serialise error          */
-#define STORELIB_ERR_XML      -4   /* XML parse error (FE3 responses)       */
+#define STORELIB_OK             0
+#define STORELIB_ERR_NULL      -1  /* null pointer argument                 */
+#define STORELIB_ERR_HTTP      -2  /* HTTP transport error                  */
+#define STORELIB_ERR_JSON      -3  /* JSON parse / serialise error          */
+#define STORELIB_ERR_XML       -4  /* XML parse error (FE3 responses)       */
 #define STORELIB_ERR_NOT_FOUND -5  /* product not found in the catalog      */
-#define STORELIB_ERR_TIMEOUT  -6   /* request timed out                     */
-#define STORELIB_ERR_OTHER    -7   /* all other errors                      */
+#define STORELIB_ERR_TIMEOUT   -6  /* request timed out                     */
+#define STORELIB_ERR_OTHER     -7  /* all other errors                      */
+#define STORELIB_ERR_CANCELLED -8  /* operation cancelled                   */
 
 /* -------------------------------------------------------------------------
  * IdentifierType constants  (storelib_query id_type parameter)
@@ -142,13 +144,16 @@ char* storelib_product_json(const StorelibHandle* handle);
 /**
  * Resolve and return the package list as a JSON array.
  *
- * Each element is an object with fields:
- *   "package_moniker" : string
- *   "package_uri"     : string | null
- *   "package_type"    : "Uap" | "Xap" | "AppX" | "Unknown"
- *   "update_id"       : string
- *   "file_size"       : number | null  (MaxDownloadSizeInBytes from the catalog; null for
- *                                       framework dependencies not listed in the catalog SKU)
+ * Each element is an object with fields (camelCase, matching the JS binding):
+ *   "packageMoniker"    : string
+ *   "packageUri"        : string | null
+ *   "packageType"       : "uap" | "xap" | "appX" | "unknown"
+ *   "applicabilityBlob" : object | null
+ *   "updateId"          : string
+ *   "packageSize"       : number | null  (bytes; FE3 first, falls back to
+ *                                         DisplayCatalog MaxDownloadSizeInBytes.
+ *                                         null for framework packages that DCat
+ *                                         does not list a size for.)
  *
  * @param handle     A valid handle after a successful storelib_query().
  * @param msa_token  Optional auth token, or NULL.
@@ -173,6 +178,72 @@ char* storelib_packages_json(StorelibHandle* handle, const char* msa_token);
  * The caller MUST free the returned string with storelib_free_string().
  */
 char* storelib_search_json(StorelibHandle* handle, const char* query, uint32_t family);
+
+/* -------------------------------------------------------------------------
+ * Progress reporting
+ * ---------------------------------------------------------------------- */
+
+/**
+ * Real-time progress callback signature.
+ *
+ * Fired during storelib_query(), storelib_packages_json(), and
+ * storelib_search_json() at each phase boundary.
+ *
+ * @param stage        Stable stage identifier, NUL-terminated UTF-8.
+ *                     Valid only for the duration of the call. Examples:
+ *                       "dcat.request", "dcat.response", "dcat.parse",
+ *                       "dcat.done", "dcat.notFound",
+ *                       "fe3.start", "fe3.getCookie", "fe3.syncUpdates",
+ *                       "fe3.parseUpdateIds", "fe3.parseUpdateIds.done",
+ *                       "fe3.parsePackages", "fe3.parsePackages.done",
+ *                       "fe3.resolveUrls", "fe3.resolveUrls.done",
+ *                       "fe3.done",
+ *                       "search.request", "search.response",
+ *                       "search.parse", "search.done"
+ * @param message      Human-readable detail, NUL-terminated UTF-8.
+ *                     Valid only for the duration of the call.
+ * @param has_current  1 if `current` carries a meaningful counter, else 0.
+ * @param current      Counter value (e.g. "5 of 12 packages"); meaningful
+ *                     only when `has_current` is 1.
+ * @param has_total    1 if `total` carries a meaningful counter, else 0.
+ * @param total        Counter total; meaningful only when `has_total` is 1.
+ * @param user_data    Opaque pointer originally passed to
+ *                     storelib_set_progress_callback().
+ *
+ * The callback is invoked from the Tokio runtime worker thread that drives
+ * the active async call — it must be thread-safe.
+ */
+typedef void (*storelib_progress_cb)(
+    const char* stage,
+    const char* message,
+    int32_t     has_current,
+    uint32_t    current,
+    int32_t     has_total,
+    uint32_t    total,
+    void*       user_data
+);
+
+/**
+ * Install a progress callback on `handle`. Pass NULL as `callback` to detach
+ * (equivalent to storelib_clear_progress_callback()).
+ *
+ * `user_data` is opaque to the library and is passed back to every callback
+ * invocation; it may be NULL. The callback must outlive any in-flight
+ * storelib_* call on this handle.
+ *
+ * @return STORELIB_OK on success, or STORELIB_ERR_NULL when `handle` is NULL.
+ */
+int32_t storelib_set_progress_callback(
+    StorelibHandle*       handle,
+    storelib_progress_cb  callback,
+    void*                 user_data
+);
+
+/**
+ * Detach the progress callback (if any). Equivalent to
+ * storelib_set_progress_callback(handle, NULL, NULL).
+ */
+int32_t storelib_clear_progress_callback(StorelibHandle* handle);
 
 /* -------------------------------------------------------------------------
  * String management
