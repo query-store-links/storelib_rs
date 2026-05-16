@@ -1,5 +1,8 @@
+use serde::{Deserialize, Serialize};
+
 /// Which DisplayCatalog endpoint to query.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum DCatEndpoint {
     Production,
     Int,
@@ -11,7 +14,8 @@ pub enum DCatEndpoint {
 }
 
 /// Package format type returned by the FE3 service.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum PackageType {
     Uap,
     Xap,
@@ -20,7 +24,8 @@ pub enum PackageType {
 }
 
 /// How to interpret the product identifier passed to a DCat query.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum IdentifierType {
     ProductId,
     XboxTitleId,
@@ -32,7 +37,8 @@ pub enum IdentifierType {
 }
 
 /// Purpose / role of an image asset attached to a product.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum ImagePurpose {
     Logo,
     Tile,
@@ -47,7 +53,8 @@ pub enum ImagePurpose {
 }
 
 /// High-level product category.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum ProductKind {
     Game,
     Application,
@@ -58,7 +65,8 @@ pub enum ProductKind {
 }
 
 /// Target device family for search / package filtering.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum DeviceFamily {
     Desktop,
     Mobile,
@@ -89,7 +97,8 @@ impl DeviceFamily {
 }
 
 /// Result status of a DisplayCatalog query.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum DisplayCatalogResult {
     NotFound,
     Restricted,

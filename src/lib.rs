@@ -4,20 +4,6 @@
 //! runtimes.  Enable the `wasm` feature when targeting `wasm32-unknown-unknown`.
 
 // ---------------------------------------------------------------------------
-// WASM initialisation
-// ---------------------------------------------------------------------------
-
-#[cfg(feature = "wasm")]
-use wasm_bindgen::prelude::*;
-
-/// Initialise panic hook for better WASM error messages (no-op on native).
-#[cfg(feature = "wasm")]
-#[wasm_bindgen(start)]
-pub fn wasm_init() {
-    // console_error_panic_hook would go here if added as a dependency.
-}
-
-// ---------------------------------------------------------------------------
 // Public modules
 // ---------------------------------------------------------------------------
 
@@ -28,6 +14,12 @@ pub mod utilities;
 
 #[cfg(all(feature = "ffi", not(target_arch = "wasm32")))]
 pub mod ffi;
+
+/// JS bindings exposed via wasm-bindgen. Provides `Locale`,
+/// `DisplayCatalogHandler`, `Fe3Handler`, and free helper functions for use
+/// from npm.
+#[cfg(all(feature = "wasm", target_arch = "wasm32"))]
+pub mod wasm;
 
 // ---------------------------------------------------------------------------
 // Convenient re-exports at the crate root

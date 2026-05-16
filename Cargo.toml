@@ -1,9 +1,11 @@
 [package]
 name = "storelib_rs"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 description = "Rust port of StoreLib - Microsoft Store API client"
 license = "GPL-3.0-only"
+repository = "https://github.com/query-store-links/storelib_rs"
+readme = "README.md"
 
 [lib]
 name = "storelib_rs"
@@ -11,7 +13,13 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = []
-wasm = ["wasm-bindgen", "js-sys", "wasm-bindgen-futures"]
+wasm = [
+    "wasm-bindgen",
+    "js-sys",
+    "wasm-bindgen-futures",
+    "serde-wasm-bindgen",
+    "console_error_panic_hook",
+]
 ffi = []
 
 [dependencies]
@@ -33,3 +41,5 @@ reqwest = { version = "0.12", default-features = false, features = ["json"] }
 wasm-bindgen = { version = "0.2", optional = true }
 js-sys = { version = "0.3", optional = true }
 wasm-bindgen-futures = { version = "0.4", optional = true }
+serde-wasm-bindgen = { version = "0.6", optional = true }
+console_error_panic_hook = { version = "0.1", optional = true }

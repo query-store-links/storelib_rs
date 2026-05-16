@@ -1,0 +1,62 @@
+name: Publish to npm
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write  # OIDC token for npm Trusted Publishing + provenance attestations
+
+jobs:
+  publish:
+    name: wasm-pack + npm publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+
+      # Trusted Publishing requires npm CLI >= 11.5.1; Node 20 ships an older npm.
+      - name: Upgrade npm to Trusted-Publishing-capable version
+        run: npm install -g npm@latest
+
+      - name: Install wasm-pack
+        uses: jetli/wasm-pack-action@v0.4.0
+        with:
+          version: latest
+
+      - name: Verify Cargo.toml version matches release tag
+        if: github.event_name == 'release'
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          crate_version="$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
+          if [[ "$tag" != "$crate_version" ]]; then
+            echo "::error::Release tag '$GITHUB_REF_NAME' does not match Cargo.toml version '$crate_version'."
+            exit 1
+          fi
+
+      - name: Build universal wasm package
+        shell: bash
+        run: bash tools/pack-npm.sh --scope query-store-links
+
+      # No NPM_TOKEN: auth happens via OIDC. Configure Trusted Publishing on
+      # npmjs.com for the package or for the @query-store-links scope so that
+      # this workflow file is allowed to publish.
+      - name: Publish to npm via Trusted Publishing
+        shell: bash
+        run: |
+          cd pkg
+          npm publish --access public --provenance
