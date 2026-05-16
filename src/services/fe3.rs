@@ -260,7 +260,38 @@ impl FE3Handler {
         msa_token: Option<&str>,
         client: &reqwest::Client,
     ) -> Result<Vec<(String, Option<i64>)>, StoreError> {
+        Self::get_file_urls_with_progress(
+            update_ids,
+            revision_ids,
+            msa_token,
+            client,
+            |_idx, _total, _update_id, _url, _size| {},
+        )
+        .await
+    }
+
+    /// Variant of [`Self::get_file_urls`] that fires `on_url` once per
+    /// successfully-resolved (non-blockmap) URL **as soon as the SOAP
+    /// response is parsed**, before the next request goes out. Use this to
+    /// stream live per-link updates to a UI.
+    ///
+    /// Callback args: `(request_idx, request_total, update_id, url, size)`.
+    /// `request_idx` is 0-based over `update_ids`; `request_total` equals
+    /// `update_ids.len()`. The callback may fire multiple times per request
+    /// if FE3 returns more than one `<FileLocation>` (rare for store
+    /// packages — almost always 1 per update_id).
+    pub async fn get_file_urls_with_progress<F>(
+        update_ids: &[String],
+        revision_ids: &[String],
+        msa_token: Option<&str>,
+        client: &reqwest::Client,
+        on_url: F,
+    ) -> Result<Vec<(String, Option<i64>)>, StoreError>
+    where
+        F: Fn(usize, usize, &str, &str, Option<i64>),
+    {
         let token = msa_token.unwrap_or(MSA_TOKEN);
+        let total = update_ids.len();
         let mut results = Vec::new();
 
         for (i, update_id) in update_ids.iter().enumerate() {
@@ -320,6 +351,7 @@ impl FE3Handler {
                     }
                 }
                 if let Some(url) = url_opt {
+                    on_url(i, total, update_id, &url, size_opt);
                     results.push((url, size_opt));
                 }
             }

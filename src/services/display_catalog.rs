@@ -757,19 +757,71 @@ impl DisplayCatalogHandler {
             instances.len() as u32,
             instances.len() as u32,
         );
+        // Per-package fan-out so subscribers can render a live list. Message
+        // format `"<moniker> | updateId=<id>"` so the frontend can correlate
+        // a later `fe3.linkReceived` (which also names the update_id) back
+        // to the package row it belongs to.
+        let total_pkgs = instances.len() as u32;
+        for (i, inst) in instances.iter().enumerate() {
+            let uid = update_ids.get(i).map(String::as_str).unwrap_or("");
+            self.emit_counter(
+                "fe3.packageFound",
+                format!("{} | updateId={}", inst.package_moniker, uid),
+                (i + 1) as u32,
+                total_pkgs,
+            );
+        }
 
         self.emit(
             "fe3.resolveUrls",
             format!("resolving {} URLs", update_ids.len()),
         );
-        let urls =
-            FE3Handler::get_file_urls(&update_ids, &revision_ids, msa_token, &self.client).await?;
+
+        // Build update_id → moniker lookup so the per-link callback can
+        // attach the owning package's moniker to each live URL event.
+        let moniker_by_update_id: std::collections::HashMap<&str, &str> = update_ids
+            .iter()
+            .zip(instances.iter())
+            .map(|(uid, inst)| (uid.as_str(), inst.package_moniker.as_str()))
+            .collect();
+
+        // Stream a `fe3.linkReceived` event the moment each SOAP response is
+        // parsed (i.e. before the next request goes out), enriched with the
+        // owning package's moniker so the UI can light up the matching row.
+        // Message format: `"<moniker> | uri=<url> | size=<bytes-or-?> | updateId=<id>"`.
+        let progress = self.progress.as_ref();
+        let total_req = update_ids.len();
+        let urls = FE3Handler::get_file_urls_with_progress(
+            &update_ids,
+            &revision_ids,
+            msa_token,
+            &self.client,
+            |idx, total, update_id, url, size| {
+                let Some(cb) = progress else {
+                    return;
+                };
+                let moniker = moniker_by_update_id
+                    .get(update_id)
+                    .copied()
+                    .unwrap_or("<unknown>");
+                cb(ProgressEvent {
+                    stage: "fe3.linkReceived",
+                    message: format!(
+                        "{moniker} | uri={url} | size={} | updateId={update_id}",
+                        size.map(|s| s.to_string()).unwrap_or_else(|| "?".into()),
+                    ),
+                    current: Some((idx + 1) as u32),
+                    total: Some(total as u32),
+                });
+            },
+        )
+        .await?;
         debug!("FE3: {} download URL(s) resolved", urls.len());
         self.emit_counter(
             "fe3.resolveUrls.done",
             "URLs resolved",
             urls.len() as u32,
-            urls.len() as u32,
+            total_req as u32,
         );
 
         // Build a moniker → file-size lookup from the DCat catalog packages.
@@ -793,13 +845,17 @@ impl DisplayCatalogHandler {
             })
             .collect();
 
-        info!("DCat size map ({} entries):", dcat_size_map.len());
+        // Demoted to debug so we don't spam stdout unconditionally — callers
+        // who want a live view should subscribe to the per-package emit
+        // events above (fe3.packageFound / fe3.linkReceived /
+        // fe3.packageResolved).
+        debug!("DCat size map ({} entries):", dcat_size_map.len());
         for (name, size) in &dcat_size_map {
-            info!("  DCat package: {name} = {size} bytes");
+            debug!("  DCat package: {name} = {size} bytes");
         }
-        info!("FE3 package monikers ({} entries):", instances.len());
+        debug!("FE3 package monikers ({} entries):", instances.len());
         for inst in &instances {
-            info!("  FE3 moniker: {}", inst.package_moniker);
+            debug!("  FE3 moniker: {}", inst.package_moniker);
         }
 
         for (i, instance) in instances.iter_mut().enumerate() {
@@ -814,13 +870,28 @@ impl DisplayCatalogHandler {
                     .get(instance.package_moniker.as_str())
                     .copied();
             }
-            info!(
+            debug!(
                 "  package[{i}]: moniker={} fe3_size={:?} dcat_size={:?}",
                 instance.package_moniker,
                 urls.get(i).and_then(|(_, s)| *s),
                 dcat_size_map
                     .get(instance.package_moniker.as_str())
                     .copied(),
+            );
+            self.emit_counter(
+                "fe3.packageResolved",
+                format!(
+                    "{} | uri={} | size={} | updateId={}",
+                    instance.package_moniker,
+                    instance.package_uri.as_deref().unwrap_or("<none>"),
+                    instance
+                        .file_size
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| "?".into()),
+                    instance.update_id,
+                ),
+                (i + 1) as u32,
+                total_pkgs,
             );
         }
 

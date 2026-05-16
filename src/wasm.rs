@@ -101,6 +101,18 @@ fn store_err(e: StoreError) -> JsValue {
     };
     let err = js_sys::Error::new(&e.to_string());
     let _ = Reflect::set(&err, &JsValue::from_str("kind"), &JsValue::from_str(kind));
+
+    // Expose the full Rust-side source chain as `causes: string[]` so JS can
+    // render a complete diagnostic without losing the underlying reason
+    // (e.g. `reqwest::Error → hyper::Error → io::Error`). Index 0 of
+    // `causes` is the layer directly under `e.message`; the array is empty
+    // when the error has no underlying cause. (Rust backtraces aren't useful
+    // in wasm — the JS engine already populates `.stack` on `Error`.)
+    let causes_arr = js_sys::Array::new();
+    for c in e.causes().into_iter().skip(1) {
+        causes_arr.push(&JsValue::from_str(&c));
+    }
+    let _ = Reflect::set(&err, &JsValue::from_str("causes"), &causes_arr);
     err.into()
 }
 
@@ -305,13 +317,38 @@ export interface PackageInstance {
     readableFileName: string;
 }
 
-/** Stage identifier passed to `onProgress`. Stable across releases. */
+/** Stage identifier passed to `onProgress`. Stable across releases.
+ *
+ *  Per-package / per-link fan-out stages fire once per item with
+ *  `current`/`total` set, and `message` carrying a pipe-delimited
+ *  `key=value` payload so the frontend can correlate a link back to the
+ *  package row it belongs to:
+ *
+ *  - `fe3.packageFound` (after parsing SyncUpdates) —
+ *    `"<moniker> | updateId=<id>"`. Fires once per discovered package,
+ *    burst-style after the XML parse completes.
+ *  - `fe3.linkReceived` (live during URL resolution) —
+ *    `"<moniker> | uri=<url> | size=<bytes-or-?> | updateId=<id>"`. Fires
+ *    once per resolved URL **as each FE3 SOAP response is parsed**, before
+ *    the next request goes out. `updateId` matches the value from the
+ *    corresponding `fe3.packageFound` event.
+ *  - `fe3.packageResolved` (after the final merge) —
+ *    `"<moniker> | uri=<url-or-<none>> | size=<bytes-or-?> | updateId=<id>"`.
+ *    Fires once per final `PackageInstance` you'll see in the return
+ *    array, with FE3 size falling back to the DCat size.
+ *
+ *  Parse messages by splitting on `" | "` then on `=`. The leading segment
+ *  is always the package moniker (no `key=` prefix). */
 export type ProgressStage =
     | "dcat.request" | "dcat.response" | "dcat.parse" | "dcat.done" | "dcat.notFound"
     | "fe3.start" | "fe3.getCookie" | "fe3.syncUpdates"
     | "fe3.parseUpdateIds" | "fe3.parseUpdateIds.done"
     | "fe3.parsePackages" | "fe3.parsePackages.done"
-    | "fe3.resolveUrls" | "fe3.resolveUrls.done" | "fe3.done"
+    | "fe3.packageFound"
+    | "fe3.resolveUrls" | "fe3.resolveUrls.done"
+    | "fe3.linkReceived"
+    | "fe3.packageResolved"
+    | "fe3.done"
     | "search.request" | "search.response" | "search.parse" | "search.done"
     | "retry.wait" | "retry.attempt";
 
@@ -328,11 +365,18 @@ export interface ProgressEvent {
 export type OnProgress = (event: ProgressEvent) => void;
 
 /** Error thrown by async handler methods. Branch on `.kind` to decide
- *  what to surface to the user. */
+ *  what to surface to the user.
+ *
+ *  `causes` is the Rust-side `source()` chain (excluding the top-level
+ *  message, which lives in `.message`). For an HTTP failure this is
+ *  typically `["error sending request for url …", "tcp connect error: …"]`
+ *  etc. Empty when the error has no underlying cause. The JS stack
+ *  trace is on `.stack` as usual. */
 export interface StorelibError extends Error {
     kind:
         | "http" | "json" | "xml" | "notFound"
         | "timedOut" | "cancelled" | "other";
+    causes: string[];
 }
 
 /** Top-level DisplayCatalog response. The MS Store schema is large and
@@ -695,7 +739,12 @@ impl DisplayCatalogHandlerJs {
     /// - `fe3.start`, `fe3.getCookie`, `fe3.syncUpdates`,
     ///   `fe3.parseUpdateIds`, `fe3.parseUpdateIds.done`,
     ///   `fe3.parsePackages`, `fe3.parsePackages.done`,
-    ///   `fe3.resolveUrls`, `fe3.resolveUrls.done`, `fe3.done`
+    ///   `fe3.packageFound` *(per package; `message` = moniker)*,
+    ///   `fe3.resolveUrls`, `fe3.resolveUrls.done`,
+    ///   `fe3.linkReceived` *(per URL; `message` = URL)*,
+    ///   `fe3.packageResolved` *(per package; `message` =
+    ///   `"<moniker> | size=<bytes> | uri=<url>"`)*,
+    ///   `fe3.done`
     /// - `search.request`, `search.response`, `search.parse`, `search.done`
     /// - `retry.wait`, `retry.attempt`
     #[wasm_bindgen(js_name = onProgress)]

@@ -3,13 +3,42 @@ fn main() {}
 
 #[cfg(not(target_arch = "wasm32"))]
 mod cli {
+    use std::backtrace::Backtrace;
     use std::io;
     use std::path::{Path, PathBuf};
 
     use clap::{Parser, Subcommand, ValueEnum};
     use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-    use storelib_rs::{DeviceFamily, DisplayCatalogHandler, IdentifierType, PackageInstance};
+    use storelib_rs::{
+        DeviceFamily, DisplayCatalogHandler, IdentifierType, PackageInstance, ProgressEvent,
+    };
     use tokio::io::AsyncWriteExt;
+
+    /// Install a progress callback that logs every phase boundary emitted by
+    /// the library (DCat request/response/parse, FE3 cookie/sync/parse/resolve,
+    /// search request/response, etc.) at info-level so the user sees a live
+    /// trace of what the handler is doing.
+    fn install_progress(handler: &mut DisplayCatalogHandler) {
+        handler.set_progress_callback(Box::new(|e: ProgressEvent| match (e.current, e.total) {
+            (Some(c), Some(t)) => log::info!("[{}] {}/{} — {}", e.stage, c, t, e.message),
+            _ => log::info!("[{}] {}", e.stage, e.message),
+        }));
+    }
+
+    /// Log an error with its full `source()` chain plus a forced backtrace.
+    /// Use this in place of `log::error!("...: {e}")` so failures show *why*
+    /// (the chain) and *where* (the stack) instead of a single-line message.
+    fn report_error(context: &str, err: &(dyn std::error::Error + 'static)) {
+        log::error!("{context}: {err}");
+        let mut src = err.source();
+        let mut depth = 1;
+        while let Some(e) = src {
+            log::error!("  caused by [{depth}]: {e}");
+            src = e.source();
+            depth += 1;
+        }
+        log::error!("backtrace:\n{}", Backtrace::force_capture());
+    }
 
     #[derive(Parser)]
     #[command(name = "storelib_rs", about = "Microsoft Store API client", version)]
@@ -161,31 +190,41 @@ mod cli {
             Command::Packages { id, token, id_type } => {
                 log::info!("Command: packages id={id}");
                 let mut handler = DisplayCatalogHandler::production();
+                install_progress(&mut handler);
                 if let Err(e) = handler.query_dcat(&id, id_type.into(), None).await {
-                    log::error!("Error querying product: {e}");
+                    report_error("Error querying product", &e);
                     return;
                 }
                 match handler.get_packages_for_product(token.as_deref()).await {
                     Ok(pkgs) if pkgs.is_empty() => log::info!("No packages found."),
                     Ok(pkgs) => {
                         log::info!("Found {} package(s):", pkgs.len());
-                        for pkg in &pkgs {
-                            log::info!("  {} [{:?}]", pkg.package_moniker, pkg.package_type);
+                        for (i, pkg) in pkgs.iter().enumerate() {
+                            log::info!(
+                                "  [{}/{}] {} [{:?}]",
+                                i + 1,
+                                pkgs.len(),
+                                pkg.package_moniker,
+                                pkg.package_type,
+                            );
                             if let Some(size) = pkg.file_size {
                                 log::info!("    Size: {size} bytes");
                             }
                             if let Some(uri) = &pkg.package_uri {
-                                log::info!("    URL: {uri}");
+                                log::info!("    Link received: {uri}");
+                            } else {
+                                log::warn!("    Link received: <none>");
                             }
                         }
                     }
-                    Err(e) => log::error!("Error fetching packages: {e}"),
+                    Err(e) => report_error("Error fetching packages", &e),
                 }
             }
 
             Command::Query { id, id_type, token } => {
                 log::info!("Command: query id={id}");
                 let mut handler = DisplayCatalogHandler::production();
+                install_progress(&mut handler);
                 match handler
                     .query_dcat(&id, id_type.into(), token.as_deref())
                     .await
@@ -219,7 +258,7 @@ mod cli {
                             None => log::info!("Product found but no details available."),
                         }
                     }
-                    Err(e) => log::error!("Error: {e}"),
+                    Err(e) => report_error("Query error", &e),
                 }
             }
 
@@ -233,20 +272,34 @@ mod cli {
             } => {
                 log::info!("Command: download id={id}");
                 let mut handler = DisplayCatalogHandler::production();
+                install_progress(&mut handler);
                 if let Err(e) = handler.query_dcat(&id, id_type.into(), None).await {
-                    log::error!("query_dcat failed: {e}");
+                    report_error("query_dcat failed", &e);
                     return;
                 }
                 let packages = match handler.get_packages_for_product(token.as_deref()).await {
                     Ok(p) => p,
                     Err(e) => {
-                        log::error!("get_packages_for_product failed: {e}");
+                        report_error("get_packages_for_product failed", &e);
                         return;
                     }
                 };
 
+                log::info!("Found {} package(s) in catalog:", packages.len());
+                for (i, pkg) in packages.iter().enumerate() {
+                    log::info!(
+                        "  [{}/{}] {} [{:?}] size={:?} link={}",
+                        i + 1,
+                        packages.len(),
+                        pkg.package_moniker,
+                        pkg.package_type,
+                        pkg.file_size,
+                        pkg.package_uri.as_deref().unwrap_or("<none>"),
+                    );
+                }
+
                 if let Err(e) = tokio::fs::create_dir_all(&out).await {
-                    log::error!("creating output dir {}: {e}", out.display());
+                    report_error(&format!("creating output dir {}", out.display()), &e);
                     return;
                 }
 
@@ -288,6 +341,12 @@ mod cli {
                     let filename = filename_for_package(pkg);
                     let dest = out.join(&filename);
 
+                    log::info!(
+                        "[{}/{}] received link: {filename} <- {uri}",
+                        i + 1,
+                        planned.len(),
+                    );
+
                     if !force && tokio::fs::try_exists(&dest).await.unwrap_or(false) {
                         log::info!("[{}/{}] skip (exists): {filename}", i + 1, planned.len());
                         skipped += 1;
@@ -306,6 +365,7 @@ mod cli {
                         }
                         Err(e) => {
                             pb.abandon_with_message(format!("{filename}  ✗ {e}"));
+                            report_error(&format!("download failed: {filename}"), &e);
                             errors += 1;
                             // Best-effort cleanup of the partial file.
                             let _ = tokio::fs::remove_file(&dest).await;
@@ -332,6 +392,7 @@ mod cli {
             } => {
                 log::info!("Command: search query=\"{query}\"");
                 let mut handler = DisplayCatalogHandler::production();
+                install_progress(&mut handler);
                 let result = if skip > 0 {
                     handler.search_dcat_paged(&query, family.into(), skip).await
                 } else {
@@ -360,7 +421,7 @@ mod cli {
                             }
                         }
                     }
-                    Err(e) => log::error!("Search error: {e}"),
+                    Err(e) => report_error("Search error", &e),
                 }
             }
         }
@@ -510,6 +571,12 @@ async fn main() {
     use clap::Parser;
 
     let cli = cli::Cli::parse();
+
+    // Make panic backtraces print by default. Caller can still override via
+    // the environment (e.g. RUST_BACKTRACE=0 to silence).
+    if std::env::var_os("RUST_BACKTRACE").is_none() {
+        std::env::set_var("RUST_BACKTRACE", "full");
+    }
 
     env_logger::Builder::new()
         .filter_level(cli.log_level.clone().into())
