@@ -350,10 +350,7 @@ impl DisplayCatalogHandler {
     /// First localized property on the current product (typically the one
     /// matching `selected_locale.language`, in MS Store's locale fallback order).
     pub fn localized(&self) -> Option<&ProductLocalizedProperty> {
-        self.product()?
-            .localized_properties
-            .as_deref()?
-            .first()
+        self.product()?.localized_properties.as_deref()?.first()
     }
 
     /// Title from the first localized property.
@@ -578,7 +575,8 @@ impl DisplayCatalogHandler {
         ids: &[&str],
         auth_token: Option<&str>,
     ) -> Result<(), StoreError> {
-        self.query_dcat_batch_with_cancel(ids, auth_token, None).await
+        self.query_dcat_batch_with_cancel(ids, auth_token, None)
+            .await
     }
 
     /// Cancellable variant of [`Self::query_dcat_batch`].
@@ -612,10 +610,7 @@ impl DisplayCatalogHandler {
             &self.selected_locale,
         );
         debug!("DCat batch query: GET {url}");
-        self.emit(
-            "dcat.request",
-            format!("batch GET ({} ids)", ids.len()),
-        );
+        self.emit("dcat.request", format!("batch GET ({} ids)", ids.len()));
 
         let auth = auth_token.filter(|t| !t.is_empty());
         let response = send_with_retry(
@@ -654,7 +649,10 @@ impl DisplayCatalogHandler {
         })?;
 
         let count = model.products.as_deref().map(|v| v.len()).unwrap_or(0);
-        info!("DCat batch: {count} product(s) for {} requested id(s)", ids.len());
+        info!(
+            "DCat batch: {count} product(s) for {} requested id(s)",
+            ids.len()
+        );
         self.emit("dcat.done", format!("{count} product(s)"));
 
         self.product_listing = Some(model);
@@ -860,7 +858,15 @@ impl DisplayCatalogHandler {
     }
 
     /// Search DisplayCatalog for the given query string, skipping `skip_count`
-    /// results (each page holds up to 100 results).
+    /// results.
+    ///
+    /// Note: the upstream `productFamilies/autosuggest` endpoint caps results
+    /// at ~10 entries and currently ignores the `skipItems` parameter. Calling
+    /// this with `skip_count > 0` is accepted by the server but typically
+    /// returns the same first page — autosuggest is type-ahead, not a
+    /// paginated catalog browse. Kept for forward-compat in case Microsoft
+    /// re-enables pagination, and for callers explicitly mirroring the
+    /// original StoreLib query shape.
     pub async fn search_dcat_paged(
         &mut self,
         query: &str,
@@ -1196,10 +1202,7 @@ mod tests {
         let h = handler_with_listing(json);
         assert_eq!(h.wu_category_id(), Some("cat-abc"));
         assert_eq!(h.packages().len(), 2);
-        assert_eq!(
-            h.packages()[0].package_full_name.as_deref(),
-            Some("X.Y_1"),
-        );
+        assert_eq!(h.packages()[0].package_full_name.as_deref(), Some("X.Y_1"),);
         assert_eq!(h.packages()[1].max_download_size_in_bytes, Some(5678));
     }
 
@@ -1256,10 +1259,7 @@ mod tests {
     #[tokio::test]
     async fn query_dcat_batch_rejects_empty_ids() {
         let mut h = DisplayCatalogHandler::production();
-        let err = h
-            .query_dcat_batch(&[], None)
-            .await
-            .unwrap_err();
+        let err = h.query_dcat_batch(&[], None).await.unwrap_err();
         assert!(matches!(err, StoreError::Other(_)));
     }
 
@@ -1289,16 +1289,14 @@ mod tests {
         // exercise the inner helper directly.
         let cfg = fast_retry_cfg();
         let client = reqwest::Client::new();
-        let url = format!("{}?bigIds=A,B&market=US&languages=en&catalogsource=apps&fieldsTemplate=Details", server.uri());
+        let url = format!(
+            "{}?bigIds=A,B&market=US&languages=en&catalogsource=apps&fieldsTemplate=Details",
+            server.uri()
+        );
 
-        let resp = send_with_retry(
-            || client.get(&url),
-            &cfg,
-            None,
-            |_, _| {},
-        )
-        .await
-        .unwrap();
+        let resp = send_with_retry(|| client.get(&url), &cfg, None, |_, _| {})
+            .await
+            .unwrap();
         assert_eq!(resp.status(), 200);
 
         let text = resp.text().await.unwrap();

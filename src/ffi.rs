@@ -241,9 +241,7 @@ pub unsafe extern "C" fn storelib_product_json(handle: *const StorelibHandle) ->
 /// # Safety
 /// `handle` must be a valid non-null pointer.
 #[no_mangle]
-pub unsafe extern "C" fn storelib_product_title(
-    handle: *const StorelibHandle,
-) -> *mut c_char {
+pub unsafe extern "C" fn storelib_product_title(handle: *const StorelibHandle) -> *mut c_char {
     if handle.is_null() {
         return std::ptr::null_mut();
     }
@@ -259,9 +257,7 @@ pub unsafe extern "C" fn storelib_product_title(
 /// # Safety
 /// `handle` must be a valid non-null pointer.
 #[no_mangle]
-pub unsafe extern "C" fn storelib_product_publisher(
-    handle: *const StorelibHandle,
-) -> *mut c_char {
+pub unsafe extern "C" fn storelib_product_publisher(handle: *const StorelibHandle) -> *mut c_char {
     if handle.is_null() {
         return std::ptr::null_mut();
     }
@@ -279,9 +275,7 @@ pub unsafe extern "C" fn storelib_product_publisher(
 /// # Safety
 /// `handle` must be a valid non-null pointer.
 #[no_mangle]
-pub unsafe extern "C" fn storelib_price_json(
-    handle: *const StorelibHandle,
-) -> *mut c_char {
+pub unsafe extern "C" fn storelib_price_json(handle: *const StorelibHandle) -> *mut c_char {
     if handle.is_null() {
         return std::ptr::null_mut();
     }
@@ -337,9 +331,7 @@ pub unsafe extern "C" fn storelib_availabilities_json(
 /// # Safety
 /// `handle` must be a valid non-null pointer.
 #[no_mangle]
-pub unsafe extern "C" fn storelib_wu_category_id(
-    handle: *const StorelibHandle,
-) -> *mut c_char {
+pub unsafe extern "C" fn storelib_wu_category_id(handle: *const StorelibHandle) -> *mut c_char {
     if handle.is_null() {
         return std::ptr::null_mut();
     }

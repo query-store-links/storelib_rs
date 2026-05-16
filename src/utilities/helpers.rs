@@ -53,11 +53,7 @@ pub fn endpoint_to_search_url(endpoint: &DCatEndpoint) -> &'static str {
 ///
 /// `ids` should contain Microsoft Store Product IDs only (the `bigIds`
 /// parameter does not accept alternate identifiers).
-pub fn create_dcat_batch_uri(
-    endpoint: &DCatEndpoint,
-    ids: &[&str],
-    locale: &Locale,
-) -> String {
+pub fn create_dcat_batch_uri(endpoint: &DCatEndpoint, ids: &[&str], locale: &Locale) -> String {
     // base ends with "/products/"; drop the slash so `?bigIds=...` attaches cleanly.
     let base = endpoint_to_base_url(endpoint).trim_end_matches('/');
     let trail = locale.dcat_trail();
@@ -254,7 +250,10 @@ mod tests {
             uri.starts_with("https://displaycatalog.mp.microsoft.com/v7.0/products?"),
             "got: {uri}",
         );
-        assert!(uri.contains("bigIds=9WZDNCRFJ3TJ,9NBLGGH4R315"), "got: {uri}");
+        assert!(
+            uri.contains("bigIds=9WZDNCRFJ3TJ,9NBLGGH4R315"),
+            "got: {uri}"
+        );
         assert!(uri.contains("market=US"));
         assert!(uri.contains("fieldsTemplate=Details"));
         // No trailing slash before the query string.
@@ -263,11 +262,8 @@ mod tests {
 
     #[test]
     fn batch_uri_single_id_has_no_comma() {
-        let uri = create_dcat_batch_uri(
-            &DCatEndpoint::Production,
-            &["9WZDNCRFJ3TJ"],
-            &prod_locale(),
-        );
+        let uri =
+            create_dcat_batch_uri(&DCatEndpoint::Production, &["9WZDNCRFJ3TJ"], &prod_locale());
         assert!(uri.contains("bigIds=9WZDNCRFJ3TJ&"));
         assert!(!uri.contains(",&"));
     }
@@ -275,11 +271,7 @@ mod tests {
     #[test]
     fn batch_uri_carries_locale_overrides() {
         let locale = Locale::new(Market::De, Lang::De, false);
-        let uri = create_dcat_batch_uri(
-            &DCatEndpoint::Xbox,
-            &["A", "B", "C"],
-            &locale,
-        );
+        let uri = create_dcat_batch_uri(&DCatEndpoint::Xbox, &["A", "B", "C"], &locale);
         assert!(uri.starts_with("https://xbox-displaycatalog.mp.microsoft.com/v7.0/products?"));
         assert!(uri.contains("bigIds=A,B,C"));
         assert!(uri.contains("market=DE"));
