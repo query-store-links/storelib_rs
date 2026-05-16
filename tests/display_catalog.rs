@@ -272,6 +272,42 @@ async fn get_packages_for_netflix_returns_resolved_packages() {
         packages.iter().any(|p| p.file_size.is_some()),
         "at least one package should have a non-null packageSize"
     );
+    // FE3's <File FileName="..."> must be surfaced; at least one should
+    // resolve into a readable filename ending with a known package extension.
+    let known_exts = [
+        ".appx",
+        ".appxbundle",
+        ".msix",
+        ".msixbundle",
+        ".eappx",
+        ".eappxbundle",
+        ".emsix",
+        ".emsixbundle",
+        ".xap",
+    ];
+    assert!(
+        packages.iter().any(|p| p.file_name.is_some()),
+        "at least one package should have a non-null fileName"
+    );
+    for p in &packages {
+        assert!(
+            !p.readable_file_name.is_empty(),
+            "readable_file_name should always be set",
+        );
+        assert!(
+            p.readable_file_name.starts_with(&p.package_moniker),
+            "readable_file_name {:?} should start with the moniker {:?}",
+            p.readable_file_name,
+            p.package_moniker,
+        );
+        assert!(
+            known_exts
+                .iter()
+                .any(|ext| p.readable_file_name.ends_with(ext)),
+            "readable_file_name {:?} should end with a known package extension",
+            p.readable_file_name,
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -170,11 +170,37 @@ impl FE3Handler {
 
     /// Parse `AppxMetadata` nodes from the `SyncUpdates` XML and build
     /// [`PackageInstance`] values (without resolved download URLs).
+    ///
+    /// The sibling `<File InstallerSpecificIdentifier="..." FileName="..."/>`
+    /// element carries the canonical filename (e.g. `<guid>.appxbundle`); we
+    /// match by `InstallerSpecificIdentifier == PackageMoniker` and stash
+    /// the value on [`PackageInstance::file_name`] so callers can derive
+    /// the correct download extension without guessing.
     pub async fn get_package_instances(xml: &str) -> Result<Vec<PackageInstance>, StoreError> {
         let doc = roxmltree::Document::parse(xml).map_err(|e| StoreError::Xml(e.to_string()))?;
 
-        let mut instances = Vec::new();
+        // First pass: build moniker → filename lookup from every <File> node.
+        let mut filename_by_moniker: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        for node in doc.descendants() {
+            if node.tag_name().name() != "File" {
+                continue;
+            }
+            if let (Some(moniker), Some(filename)) = (
+                node.attribute("InstallerSpecificIdentifier"),
+                node.attribute("FileName"),
+            ) {
+                // Skip blockmap files — they share the moniker but use the
+                // primary file's `FileName` should always win. The first
+                // <File> for a given moniker is the binary; subsequent ones
+                // (blockmap, etc.) we ignore via `entry().or_insert`.
+                filename_by_moniker
+                    .entry(moniker.to_owned())
+                    .or_insert_with(|| filename.to_owned());
+            }
+        }
 
+        let mut instances = Vec::new();
         for node in doc.descendants() {
             if node.tag_name().name() != "AppxMetadata" {
                 continue;
@@ -202,6 +228,10 @@ impl FE3Handler {
                     serde_json::from_str(t).ok()
                 });
 
+            let file_name = filename_by_moniker.get(&moniker).cloned();
+            let readable_file_name =
+                PackageInstance::build_readable_file_name(&moniker, file_name.as_deref());
+
             instances.push(PackageInstance {
                 package_moniker: moniker,
                 package_uri: None,
@@ -209,6 +239,8 @@ impl FE3Handler {
                 applicability_blob: blob,
                 update_id: String::new(),
                 file_size: None,
+                file_name,
+                readable_file_name,
             });
         }
 

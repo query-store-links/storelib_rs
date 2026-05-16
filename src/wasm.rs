@@ -253,6 +253,17 @@ export interface PackageInstance {
      *  DisplayCatalog `MaxDownloadSizeInBytes` field. `null` only for
      *  framework packages that DCat doesn't list a size for. */
     packageSize: number | null;
+    /** FE3's raw `<File FileName="...">` value — typically `<guid>.<ext>`
+     *  (e.g. "1b599478-…-f8c4de1670d4.appxbundle"). Useful for low-level
+     *  matching against the FE3 SOAP response. */
+    fileName: string | null;
+    /** Human-readable filename you can save the package to disk as:
+     *  `<packageMoniker><real extension>`, e.g.
+     *  "4DF9E0F8.Netflix_8.156.0.0_neutral_~_mcm4njqhnhss8.appxbundle".
+     *  Always set; falls back to a `.appx` extension when FE3 didn't
+     *  report a recognised one. Not sanitised for filesystem reserved
+     *  characters — sanitise per-OS before saving. */
+    readableFileName: string;
 }
 
 /** Stage identifier passed to `onProgress`. Stable across releases. */

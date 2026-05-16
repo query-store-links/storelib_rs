@@ -231,15 +231,20 @@ char* storelib_query_batch_json_with_cancel(
  * Resolve and return the package list as a JSON array.
  *
  * Each element is an object with fields (camelCase, matching the JS binding):
- *   "packageMoniker"    : string
- *   "packageUri"        : string | null
- *   "packageType"       : "uap" | "xap" | "appX" | "unknown"
- *   "applicabilityBlob" : object | null
- *   "updateId"          : string
- *   "packageSize"       : number | null  (bytes; FE3 first, falls back to
- *                                         DisplayCatalog MaxDownloadSizeInBytes.
- *                                         null for framework packages that DCat
- *                                         does not list a size for.)
+ *   "packageMoniker"     : string
+ *   "packageUri"         : string | null
+ *   "packageType"        : "uap" | "xap" | "appX" | "unknown"
+ *   "applicabilityBlob"  : object | null
+ *   "updateId"           : string
+ *   "packageSize"        : number | null  (bytes; FE3 first, falls back to
+ *                                          DisplayCatalog MaxDownloadSizeInBytes.
+ *                                          null for framework packages that DCat
+ *                                          does not list a size for.)
+ *   "fileName"           : string | null  (FE3 raw <File FileName="..."> —
+ *                                          typically "<guid>.<ext>")
+ *   "readableFileName"   : string         (<packageMoniker><real extension>;
+ *                                          falls back to ".appx" if FE3 did
+ *                                          not report a recognised one)
  *
  * @param handle     A valid handle after a successful storelib_query().
  * @param msa_token  Optional auth token, or NULL.
