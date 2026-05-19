@@ -137,7 +137,7 @@ let packages = handler.get_packages_for_product(Some("your-token")).await?;
 ```rust
 use storelib_rs::ProgressEvent;
 
-handler.set_progress_callback(Box::new(|e: ProgressEvent| {
+handler.progress.set(Box::new(|e: ProgressEvent| {
     eprintln!("[{}] {} ({:?}/{:?})", e.stage, e.message, e.current, e.total);
 }));
 ```

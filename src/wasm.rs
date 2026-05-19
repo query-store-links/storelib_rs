@@ -17,7 +17,7 @@ use crate::cancellation::CancellationToken;
 use crate::error::StoreError;
 use crate::models::enums::{DCatEndpoint, DeviceFamily, IdentifierType};
 use crate::models::locale::{Lang, LanguageTag, Locale, Market};
-use crate::services::display_catalog::{DisplayCatalogHandler, ProgressCallback, ProgressEvent};
+use crate::services::display_catalog::{DisplayCatalogHandler, ProgressEmitter, ProgressEvent};
 use crate::services::fe3::FE3Handler;
 use crate::utilities::helpers as h;
 
@@ -114,6 +114,23 @@ fn store_err(e: StoreError) -> JsValue {
     }
     let _ = Reflect::set(&err, &JsValue::from_str("causes"), &causes_arr);
     err.into()
+}
+
+/// Wire a JS `Function` into `emitter`, or detach when `callback` is
+/// `null`/`undefined`. Shared by every `onProgress` binding.
+fn install_js_progress(callback: JsValue, emitter: &mut ProgressEmitter) {
+    if callback.is_null() || callback.is_undefined() {
+        emitter.clear();
+        return;
+    }
+    let Ok(func): Result<Function, _> = callback.dyn_into() else {
+        emitter.clear();
+        return;
+    };
+    emitter.set(Box::new(move |event: ProgressEvent| {
+        let val = to_js(&event).unwrap_or(JsValue::NULL);
+        let _ = func.call1(&JsValue::NULL, &val);
+    }));
 }
 
 // ---------------------------------------------------------------------------
@@ -496,19 +513,7 @@ impl DisplayCatalogHandlerJs {
         &mut self,
         #[wasm_bindgen(unchecked_param_type = "OnProgress | null")] callback: JsValue,
     ) {
-        if callback.is_null() || callback.is_undefined() {
-            self.inner.clear_progress_callback();
-            return;
-        }
-        let Ok(func): Result<Function, _> = callback.dyn_into() else {
-            self.inner.clear_progress_callback();
-            return;
-        };
-        let cb = move |event: ProgressEvent| {
-            let val = to_js(&event).unwrap_or(JsValue::NULL);
-            let _ = func.call1(&JsValue::NULL, &val);
-        };
-        self.inner.set_progress_callback(Box::new(cb));
+        install_js_progress(callback, &mut self.inner.progress);
     }
 
     /// Query DisplayCatalog for a product by `id` and `idType`. Resolves to the
@@ -756,20 +761,19 @@ impl DisplayCatalogHandlerJs {
 /// resolve direct package download URLs.
 #[wasm_bindgen(js_name = Fe3Handler)]
 pub struct Fe3HandlerJs {
-    client: reqwest::Client,
-    progress: Option<ProgressCallback>,
+    inner: FE3Handler,
 }
 
 #[wasm_bindgen(js_class = Fe3Handler)]
 impl Fe3HandlerJs {
     #[wasm_bindgen(constructor)]
     pub fn new() -> Fe3HandlerJs {
+        let client = reqwest::Client::builder()
+            .user_agent("StoreLib")
+            .build()
+            .unwrap_or_default();
         Fe3HandlerJs {
-            client: reqwest::Client::builder()
-                .user_agent("StoreLib")
-                .build()
-                .unwrap_or_default(),
-            progress: None,
+            inner: FE3Handler::new(client),
         }
     }
 
@@ -785,25 +789,13 @@ impl Fe3HandlerJs {
         &mut self,
         #[wasm_bindgen(unchecked_param_type = "OnProgress | null")] callback: JsValue,
     ) {
-        if callback.is_null() || callback.is_undefined() {
-            self.progress = None;
-            return;
-        }
-        let Ok(func): Result<Function, _> = callback.dyn_into() else {
-            self.progress = None;
-            return;
-        };
-        let cb = move |event: ProgressEvent| {
-            let val = to_js(&event).unwrap_or(JsValue::NULL);
-            let _ = func.call1(&JsValue::NULL, &val);
-        };
-        self.progress = Some(Box::new(cb));
+        install_js_progress(callback, &mut self.inner.progress);
     }
 
     /// POST `GetCookie` and return the `EncryptedData` value from the response.
     #[wasm_bindgen(js_name = getCookie)]
     pub async fn get_cookie(&self) -> Result<String, JsValue> {
-        FE3Handler::get_cookie(&self.client)
+        FE3Handler::get_cookie(&self.inner.client)
             .await
             .map_err(store_err)
     }
@@ -816,7 +808,7 @@ impl Fe3HandlerJs {
         wu_category_id: String,
         msa_token: Option<String>,
     ) -> Result<String, JsValue> {
-        FE3Handler::sync_updates(&wu_category_id, msa_token.as_deref(), &self.client)
+        FE3Handler::sync_updates(&wu_category_id, msa_token.as_deref(), &self.inner.client)
             .await
             .map_err(store_err)
     }
@@ -852,9 +844,7 @@ impl Fe3HandlerJs {
     /// Returns `Array<{url: string, size: number | null}>`.
     ///
     /// Subscribe via [`Self::on_progress`] to stream `fe3.linkReceived`
-    /// events live as each `GetExtendedUpdateInfo2` response is parsed,
-    /// before the next request goes out — mirrors the per-link emit done
-    /// from `DisplayCatalogHandler::get_packages_for_product`.
+    /// events as each `GetExtendedUpdateInfo2` response is parsed.
     #[wasm_bindgen(js_name = getFileUrls)]
     pub async fn get_file_urls(
         &self,
@@ -865,29 +855,11 @@ impl Fe3HandlerJs {
         let update_ids: Vec<String> = from_value(update_ids).map_err(js_err)?;
         let revision_ids: Vec<String> = from_value(revision_ids).map_err(js_err)?;
 
-        let progress = self.progress.as_ref();
-        let pairs = FE3Handler::get_file_urls_with_progress(
-            &update_ids,
-            &revision_ids,
-            msa_token.as_deref(),
-            &self.client,
-            |idx, total, update_id, url, size| {
-                let Some(cb) = progress else {
-                    return;
-                };
-                cb(ProgressEvent {
-                    stage: "fe3.linkReceived",
-                    message: format!(
-                        "uri={url} | size={} | updateId={update_id}",
-                        size.map(|s| s.to_string()).unwrap_or_else(|| "?".into()),
-                    ),
-                    current: Some((idx + 1) as u32),
-                    total: Some(total as u32),
-                });
-            },
-        )
-        .await
-        .map_err(store_err)?;
+        let pairs = self
+            .inner
+            .get_file_urls(&update_ids, &revision_ids, msa_token.as_deref())
+            .await
+            .map_err(store_err)?;
 
         #[derive(serde::Serialize)]
         struct UrlEntry {

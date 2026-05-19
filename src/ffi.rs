@@ -149,42 +149,7 @@ pub unsafe extern "C" fn storelib_query(
     id_type: u32,
     auth_token: *const c_char,
 ) -> i32 {
-    if handle.is_null() || id.is_null() {
-        return STORELIB_ERR_NULL;
-    }
-    let h = &mut *handle;
-    h.clear_error();
-
-    let id_str = match CStr::from_ptr(id).to_str() {
-        Ok(s) => s,
-        Err(_) => {
-            h.set_error("id is not valid UTF-8");
-            return STORELIB_ERR_NULL;
-        }
-    };
-
-    let token: Option<&str> = if auth_token.is_null() {
-        None
-    } else {
-        match CStr::from_ptr(auth_token).to_str() {
-            Ok(s) => Some(s),
-            Err(_) => {
-                h.set_error("auth_token is not valid UTF-8");
-                return STORELIB_ERR_NULL;
-            }
-        }
-    };
-
-    let id_enum = id_type_from_u32(id_type);
-
-    match h.rt.block_on(h.handler.query_dcat(id_str, id_enum, token)) {
-        Ok(_) => STORELIB_OK,
-        Err(e) => {
-            let code = err_code(&e);
-            h.set_error(&e.to_string());
-            code
-        }
-    }
+    storelib_query_with_cancel(handle, id, id_type, auth_token, std::ptr::null())
 }
 
 /// Returns `1` if the last [`storelib_query`] found the product, `0` otherwise.
@@ -366,7 +331,7 @@ pub unsafe extern "C" fn storelib_query_batch_json(
     id_count: usize,
     auth_token: *const c_char,
 ) -> *mut c_char {
-    storelib_query_batch_json_with_cancel_impl(handle, ids, id_count, auth_token, std::ptr::null())
+    storelib_query_batch_json_with_cancel(handle, ids, id_count, auth_token, std::ptr::null())
 }
 
 /// Cancellable variant of [`storelib_query_batch_json`].
@@ -375,16 +340,6 @@ pub unsafe extern "C" fn storelib_query_batch_json(
 /// Same as [`storelib_query_batch_json`]; `cancel` may be null.
 #[no_mangle]
 pub unsafe extern "C" fn storelib_query_batch_json_with_cancel(
-    handle: *mut StorelibHandle,
-    ids: *const *const c_char,
-    id_count: usize,
-    auth_token: *const c_char,
-    cancel: *const StorelibCancellation,
-) -> *mut c_char {
-    storelib_query_batch_json_with_cancel_impl(handle, ids, id_count, auth_token, cancel)
-}
-
-unsafe fn storelib_query_batch_json_with_cancel_impl(
     handle: *mut StorelibHandle,
     ids: *const *const c_char,
     id_count: usize,
@@ -416,23 +371,11 @@ unsafe fn storelib_query_batch_json_with_cancel_impl(
     }
     let id_refs: Vec<&str> = owned.iter().map(String::as_str).collect();
 
-    let token: Option<&str> = if auth_token.is_null() {
-        None
-    } else {
-        match CStr::from_ptr(auth_token).to_str() {
-            Ok(s) => Some(s),
-            Err(_) => {
-                h.set_error("auth_token is not valid UTF-8");
-                return std::ptr::null_mut();
-            }
-        }
+    let token = match cstr_opt_to_str(auth_token, h, "auth_token") {
+        Ok(t) => t,
+        Err(()) => return std::ptr::null_mut(),
     };
-
-    let cancel_ref = if cancel.is_null() {
-        None
-    } else {
-        Some(&(*cancel).token)
-    };
+    let cancel_ref = cancel_token_ref(cancel);
 
     match h.rt.block_on(
         h.handler
@@ -470,37 +413,7 @@ pub unsafe extern "C" fn storelib_packages_json(
     handle: *mut StorelibHandle,
     msa_token: *const c_char,
 ) -> *mut c_char {
-    if handle.is_null() {
-        return std::ptr::null_mut();
-    }
-    let h = &mut *handle;
-    h.clear_error();
-
-    let token: Option<&str> = if msa_token.is_null() {
-        None
-    } else {
-        match CStr::from_ptr(msa_token).to_str() {
-            Ok(s) => Some(s),
-            Err(_) => {
-                h.set_error("msa_token is not valid UTF-8");
-                return std::ptr::null_mut();
-            }
-        }
-    };
-
-    match h.rt.block_on(h.handler.get_packages_for_product(token)) {
-        Ok(pkgs) => match serde_json::to_string(&pkgs) {
-            Ok(json) => cstring_into_raw(json),
-            Err(e) => {
-                h.set_error(&e.to_string());
-                std::ptr::null_mut()
-            }
-        },
-        Err(e) => {
-            h.set_error(&e.to_string());
-            std::ptr::null_mut()
-        }
-    }
+    storelib_packages_json_with_cancel(handle, msa_token, std::ptr::null())
 }
 
 // ---------------------------------------------------------------------------
@@ -522,35 +435,7 @@ pub unsafe extern "C" fn storelib_search_json(
     query: *const c_char,
     family: u32,
 ) -> *mut c_char {
-    if handle.is_null() || query.is_null() {
-        return std::ptr::null_mut();
-    }
-    let h = &mut *handle;
-    h.clear_error();
-
-    let query_str = match CStr::from_ptr(query).to_str() {
-        Ok(s) => s,
-        Err(_) => {
-            h.set_error("query is not valid UTF-8");
-            return std::ptr::null_mut();
-        }
-    };
-
-    let fam = family_from_u32(family);
-
-    match h.rt.block_on(h.handler.search_dcat(query_str, fam)) {
-        Ok(results) => match serde_json::to_string(&results) {
-            Ok(json) => cstring_into_raw(json),
-            Err(e) => {
-                h.set_error(&e.to_string());
-                std::ptr::null_mut()
-            }
-        },
-        Err(e) => {
-            h.set_error(&e.to_string());
-            std::ptr::null_mut()
-        }
-    }
+    storelib_search_json_with_cancel(handle, query, family, std::ptr::null())
 }
 
 // ---------------------------------------------------------------------------
@@ -600,30 +485,29 @@ pub unsafe extern "C" fn storelib_set_progress_callback(
             // closure casts it back to *mut c_void on entry. Function pointers
             // are already Send + Sync.
             let user_data_addr = user_data as usize;
-            h.handler
-                .set_progress_callback(Box::new(move |e: ProgressEvent| {
-                    let stage = CString::new(e.stage).unwrap_or_default();
-                    let message = CString::new(e.message).unwrap_or_default();
-                    let (has_c, cur) = match e.current {
-                        Some(v) => (1, v),
-                        None => (0, 0),
-                    };
-                    let (has_t, tot) = match e.total {
-                        Some(v) => (1, v),
-                        None => (0, 0),
-                    };
-                    (cb)(
-                        stage.as_ptr(),
-                        message.as_ptr(),
-                        has_c,
-                        cur,
-                        has_t,
-                        tot,
-                        user_data_addr as *mut c_void,
-                    );
-                }));
+            h.handler.progress.set(Box::new(move |e: ProgressEvent| {
+                let stage = CString::new(e.stage).unwrap_or_default();
+                let message = CString::new(e.message).unwrap_or_default();
+                let (has_c, cur) = match e.current {
+                    Some(v) => (1, v),
+                    None => (0, 0),
+                };
+                let (has_t, tot) = match e.total {
+                    Some(v) => (1, v),
+                    None => (0, 0),
+                };
+                (cb)(
+                    stage.as_ptr(),
+                    message.as_ptr(),
+                    has_c,
+                    cur,
+                    has_t,
+                    tot,
+                    user_data_addr as *mut c_void,
+                );
+            }));
         }
-        None => h.handler.clear_progress_callback(),
+        None => h.handler.progress.clear(),
     }
     STORELIB_OK
 }
@@ -638,7 +522,7 @@ pub unsafe extern "C" fn storelib_clear_progress_callback(handle: *mut StorelibH
     if handle.is_null() {
         return STORELIB_ERR_NULL;
     }
-    (*handle).handler.clear_progress_callback();
+    (*handle).handler.progress.clear();
     STORELIB_OK
 }
 
@@ -731,32 +615,16 @@ pub unsafe extern "C" fn storelib_query_with_cancel(
     let h = &mut *handle;
     h.clear_error();
 
-    let id_str = match CStr::from_ptr(id).to_str() {
+    let id_str = match cstr_required_to_str(id, h, "id") {
         Ok(s) => s,
-        Err(_) => {
-            h.set_error("id is not valid UTF-8");
-            return STORELIB_ERR_NULL;
-        }
+        Err(()) => return STORELIB_ERR_NULL,
     };
-
-    let token: Option<&str> = if auth_token.is_null() {
-        None
-    } else {
-        match CStr::from_ptr(auth_token).to_str() {
-            Ok(s) => Some(s),
-            Err(_) => {
-                h.set_error("auth_token is not valid UTF-8");
-                return STORELIB_ERR_NULL;
-            }
-        }
+    let token = match cstr_opt_to_str(auth_token, h, "auth_token") {
+        Ok(t) => t,
+        Err(()) => return STORELIB_ERR_NULL,
     };
-
     let id_enum = id_type_from_u32(id_type);
-    let cancel_ref = if cancel.is_null() {
-        None
-    } else {
-        Some(&(*cancel).token)
-    };
+    let cancel_ref = cancel_token_ref(cancel);
 
     match h.rt.block_on(
         h.handler
@@ -790,35 +658,17 @@ pub unsafe extern "C" fn storelib_packages_json_with_cancel(
     let h = &mut *handle;
     h.clear_error();
 
-    let token: Option<&str> = if msa_token.is_null() {
-        None
-    } else {
-        match CStr::from_ptr(msa_token).to_str() {
-            Ok(s) => Some(s),
-            Err(_) => {
-                h.set_error("msa_token is not valid UTF-8");
-                return std::ptr::null_mut();
-            }
-        }
+    let token = match cstr_opt_to_str(msa_token, h, "msa_token") {
+        Ok(t) => t,
+        Err(()) => return std::ptr::null_mut(),
     };
-
-    let cancel_ref = if cancel.is_null() {
-        None
-    } else {
-        Some(&(*cancel).token)
-    };
+    let cancel_ref = cancel_token_ref(cancel);
 
     match h.rt.block_on(
         h.handler
             .get_packages_for_product_with_cancel(token, cancel_ref),
     ) {
-        Ok(pkgs) => match serde_json::to_string(&pkgs) {
-            Ok(json) => cstring_into_raw(json),
-            Err(e) => {
-                h.set_error(&e.to_string());
-                std::ptr::null_mut()
-            }
-        },
+        Ok(pkgs) => json_result_to_cstr(&pkgs, h),
         Err(e) => {
             h.set_error(&e.to_string());
             std::ptr::null_mut()
@@ -845,32 +695,18 @@ pub unsafe extern "C" fn storelib_search_json_with_cancel(
     let h = &mut *handle;
     h.clear_error();
 
-    let query_str = match CStr::from_ptr(query).to_str() {
+    let query_str = match cstr_required_to_str(query, h, "query") {
         Ok(s) => s,
-        Err(_) => {
-            h.set_error("query is not valid UTF-8");
-            return std::ptr::null_mut();
-        }
+        Err(()) => return std::ptr::null_mut(),
     };
-
     let fam = family_from_u32(family);
-    let cancel_ref = if cancel.is_null() {
-        None
-    } else {
-        Some(&(*cancel).token)
-    };
+    let cancel_ref = cancel_token_ref(cancel);
 
     match h.rt.block_on(
         h.handler
             .search_dcat_with_cancel(query_str, fam, cancel_ref),
     ) {
-        Ok(results) => match serde_json::to_string(&results) {
-            Ok(json) => cstring_into_raw(json),
-            Err(e) => {
-                h.set_error(&e.to_string());
-                std::ptr::null_mut()
-            }
-        },
+        Ok(results) => json_result_to_cstr(&results, h),
         Err(e) => {
             h.set_error(&e.to_string());
             std::ptr::null_mut()
@@ -905,6 +741,69 @@ fn cstring_into_raw(s: String) -> *mut c_char {
     match CString::new(s) {
         Ok(cs) => cs.into_raw(),
         Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Convert a possibly-null `*const c_char` into `Option<&str>`. On invalid
+/// UTF-8 records an error on `h` and returns `Err(())`; the caller should
+/// short-circuit to a `null_mut()` or `STORELIB_ERR_*` return.
+unsafe fn cstr_opt_to_str<'a>(
+    ptr: *const c_char,
+    h: &mut StorelibHandle,
+    name: &str,
+) -> Result<Option<&'a str>, ()> {
+    if ptr.is_null() {
+        return Ok(None);
+    }
+    match CStr::from_ptr(ptr).to_str() {
+        Ok(s) => Ok(Some(s)),
+        Err(_) => {
+            h.set_error(&format!("{name} is not valid UTF-8"));
+            Err(())
+        }
+    }
+}
+
+/// Like [`cstr_opt_to_str`] but the input is required; null is treated as
+/// invalid UTF-8 (callers should null-check before calling).
+unsafe fn cstr_required_to_str<'a>(
+    ptr: *const c_char,
+    h: &mut StorelibHandle,
+    name: &str,
+) -> Result<&'a str, ()> {
+    match CStr::from_ptr(ptr).to_str() {
+        Ok(s) => Ok(s),
+        Err(_) => {
+            h.set_error(&format!("{name} is not valid UTF-8"));
+            Err(())
+        }
+    }
+}
+
+/// Translate a `*const StorelibCancellation` into the borrowed token form
+/// the Rust-side `_with_cancel` methods expect.
+unsafe fn cancel_token_ref<'a>(
+    cancel: *const StorelibCancellation,
+) -> Option<&'a CancellationToken> {
+    if cancel.is_null() {
+        None
+    } else {
+        Some(&(*cancel).token)
+    }
+}
+
+/// Serialize `value` to JSON and convert it to a heap-allocated C string.
+/// On serialization failure records the error on `h` and returns null.
+fn json_result_to_cstr<T: serde::Serialize + ?Sized>(
+    value: &T,
+    h: &mut StorelibHandle,
+) -> *mut c_char {
+    match serde_json::to_string(value) {
+        Ok(json) => cstring_into_raw(json),
+        Err(e) => {
+            h.set_error(&e.to_string());
+            std::ptr::null_mut()
+        }
     }
 }
 

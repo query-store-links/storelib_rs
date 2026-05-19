@@ -51,6 +51,21 @@ impl IdentifierType {
         }
     }
 
+    /// The `alternateId=` value used in DisplayCatalog `lookup` URLs, or
+    /// `None` for [`Self::ProductId`] (which uses the path-segment form
+    /// `…/products/<id>` instead of `…/lookup?alternateId=…&Value=<id>`).
+    pub fn dcat_alternate_id_name(&self) -> Option<&'static str> {
+        Some(match self {
+            IdentifierType::ProductId => return None,
+            IdentifierType::XboxTitleId => "XboxTitleID",
+            IdentifierType::PackageFamilyName => "PackageFamilyName",
+            IdentifierType::ContentId => "CONTENTID",
+            IdentifierType::LegacyWindowsPhoneProductId => "LegacyWindowsPhoneProductID",
+            IdentifierType::LegacyWindowsStoreProductId => "LegacyWindowsStoreProductID",
+            IdentifierType::LegacyXboxProductId => "LegacyXboxProductID",
+        })
+    }
+
     /// Parse a string in any common casing — `ProductId`, `productId`,
     /// `product-id`, `PRODUCT_ID`, `product_id` — into the canonical enum.
     /// Non-alphanumeric characters are stripped before comparison.

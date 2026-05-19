@@ -222,7 +222,7 @@ pub struct ProgressEvent {
     pub total: Option<u32>,
 }
 
-/// Callback type for [`DisplayCatalogHandler::set_progress_callback`].
+/// Callback type for [`ProgressEmitter::set`].
 ///
 /// On native targets the callback must be `Send + Sync` so the handler
 /// stays multi-thread-friendly. On WASM the bound is relaxed to plain
@@ -231,6 +231,53 @@ pub struct ProgressEvent {
 pub type ProgressCallback = Box<dyn Fn(ProgressEvent) + Send + Sync + 'static>;
 #[cfg(target_arch = "wasm32")]
 pub type ProgressCallback = Box<dyn Fn(ProgressEvent) + 'static>;
+
+/// Optional [`ProgressCallback`] plus its `emit` plumbing — embedded as a
+/// public field on every handler that publishes progress events, so the
+/// `set` / `clear` / `emit` API lives in one place.
+#[derive(Default)]
+pub struct ProgressEmitter {
+    callback: Option<ProgressCallback>,
+}
+
+impl ProgressEmitter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn set(&mut self, cb: ProgressCallback) {
+        self.callback = Some(cb);
+    }
+
+    pub fn clear(&mut self) {
+        self.callback = None;
+    }
+
+    pub fn emit(&self, stage: &'static str, message: impl Into<String>) {
+        self.fire(stage, message.into(), None, None);
+    }
+
+    pub fn emit_counter(
+        &self,
+        stage: &'static str,
+        message: impl Into<String>,
+        current: u32,
+        total: u32,
+    ) {
+        self.fire(stage, message.into(), Some(current), Some(total));
+    }
+
+    fn fire(&self, stage: &'static str, message: String, current: Option<u32>, total: Option<u32>) {
+        if let Some(cb) = &self.callback {
+            cb(ProgressEvent {
+                stage,
+                message,
+                current,
+                total,
+            });
+        }
+    }
+}
 
 /// High-level client for the Microsoft DisplayCatalog API.
 ///
@@ -247,7 +294,8 @@ pub struct DisplayCatalogHandler {
     pub is_found: bool,
     client: reqwest::Client,
     pub(crate) config: ClientConfig,
-    progress: Option<ProgressCallback>,
+    /// Subscribe with `handler.progress.set(Box::new(|e| ...))`.
+    pub progress: ProgressEmitter,
 }
 
 impl DisplayCatalogHandler {
@@ -273,54 +321,13 @@ impl DisplayCatalogHandler {
             is_found: false,
             client,
             config,
-            progress: None,
+            progress: ProgressEmitter::new(),
         }
     }
 
     /// Returns a reference to the handler's [`ClientConfig`].
     pub fn config(&self) -> &ClientConfig {
         &self.config
-    }
-
-    /// Install a callback that fires at every phase boundary inside
-    /// `query_dcat`, `get_packages_for_product`, and `search_dcat`. Replaces
-    /// any previously-installed callback. Pass [`None`] via
-    /// [`Self::clear_progress_callback`] to detach.
-    pub fn set_progress_callback(&mut self, cb: ProgressCallback) {
-        self.progress = Some(cb);
-    }
-
-    /// Detach the progress callback (if any).
-    pub fn clear_progress_callback(&mut self) {
-        self.progress = None;
-    }
-
-    pub(crate) fn emit(&self, stage: &'static str, message: impl Into<String>) {
-        if let Some(cb) = &self.progress {
-            cb(ProgressEvent {
-                stage,
-                message: message.into(),
-                current: None,
-                total: None,
-            });
-        }
-    }
-
-    pub(crate) fn emit_counter(
-        &self,
-        stage: &'static str,
-        message: impl Into<String>,
-        current: u32,
-        total: u32,
-    ) {
-        if let Some(cb) = &self.progress {
-            cb(ProgressEvent {
-                stage,
-                message: message.into(),
-                current: Some(current),
-                total: Some(total),
-            });
-        }
     }
 
     /// Convenience constructor for the production endpoint with the default
@@ -495,7 +502,7 @@ impl DisplayCatalogHandler {
 
         let url = create_dcat_uri(&self.selected_endpoint, id, &id_type, &self.selected_locale);
         debug!("DCat query: GET {url}");
-        self.emit("dcat.request", format!("GET id={id}"));
+        self.progress.emit("dcat.request", format!("GET id={id}"));
 
         let auth = auth_token.filter(|t| !t.is_empty());
         let response = send_with_retry(
@@ -508,7 +515,7 @@ impl DisplayCatalogHandler {
             },
             &self.config,
             None,
-            |stage, msg| self.emit(stage, msg),
+            |stage, msg| self.progress.emit(stage, msg),
         )
         .await
         .map_err(|e| {
@@ -520,12 +527,14 @@ impl DisplayCatalogHandler {
 
         let status = response.status();
         debug!("DCat response: HTTP {status}");
-        self.emit("dcat.response", format!("HTTP {status}"));
+        self.progress
+            .emit("dcat.response", format!("HTTP {status}"));
 
         if status.is_success() {
             let body = response.text().await.map_err(StoreError::Http)?;
             debug!("DCat response body: {} bytes", body.len());
-            self.emit("dcat.parse", format!("{} bytes", body.len()));
+            self.progress
+                .emit("dcat.parse", format!("{} bytes", body.len()));
             let model: DisplayCatalogModel = serde_json::from_str(&body).map_err(|e| {
                 error!("DCat JSON parse error: {e}");
                 log_json_context(&body, e.column());
@@ -541,14 +550,14 @@ impl DisplayCatalogHandler {
                 .and_then(|lp| lp.product_title.as_deref())
                 .unwrap_or("<no title>");
             info!("DCat found: \"{title}\" (id={id})");
-            self.emit("dcat.done", format!("\"{title}\""));
+            self.progress.emit("dcat.done", format!("\"{title}\""));
             self.product_listing = Some(model);
             self.result = Some(DisplayCatalogResult::Found);
             self.is_found = true;
             Ok(())
         } else if status == reqwest::StatusCode::NOT_FOUND {
             warn!("DCat: product not found (id={id})");
-            self.emit("dcat.notFound", format!("id={id}"));
+            self.progress.emit("dcat.notFound", format!("id={id}"));
             self.result = Some(DisplayCatalogResult::NotFound);
             Err(StoreError::NotFound)
         } else {
@@ -611,7 +620,8 @@ impl DisplayCatalogHandler {
             &self.selected_locale,
         );
         debug!("DCat batch query: GET {url}");
-        self.emit("dcat.request", format!("batch GET ({} ids)", ids.len()));
+        self.progress
+            .emit("dcat.request", format!("batch GET ({} ids)", ids.len()));
 
         let auth = auth_token.filter(|t| !t.is_empty());
         let response = send_with_retry(
@@ -624,13 +634,14 @@ impl DisplayCatalogHandler {
             },
             &self.config,
             None,
-            |stage, msg| self.emit(stage, msg),
+            |stage, msg| self.progress.emit(stage, msg),
         )
         .await?;
 
         let status = response.status();
         debug!("DCat batch response: HTTP {status}");
-        self.emit("dcat.response", format!("HTTP {status}"));
+        self.progress
+            .emit("dcat.response", format!("HTTP {status}"));
 
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
@@ -641,7 +652,8 @@ impl DisplayCatalogHandler {
         }
 
         let body = response.text().await.map_err(StoreError::Http)?;
-        self.emit("dcat.parse", format!("{} bytes", body.len()));
+        self.progress
+            .emit("dcat.parse", format!("{} bytes", body.len()));
 
         let model: DisplayCatalogModel = serde_json::from_str(&body).map_err(|e| {
             error!("DCat batch JSON parse error: {e}");
@@ -654,7 +666,8 @@ impl DisplayCatalogHandler {
             "DCat batch: {count} product(s) for {} requested id(s)",
             ids.len()
         );
-        self.emit("dcat.done", format!("{count} product(s)"));
+        self.progress
+            .emit("dcat.done", format!("{count} product(s)"));
 
         self.product_listing = Some(model);
         self.result = Some(DisplayCatalogResult::Found);
@@ -700,59 +713,44 @@ impl DisplayCatalogHandler {
         &self,
         msa_token: Option<&str>,
     ) -> Result<Vec<PackageInstance>, StoreError> {
-        let listing = self.product_listing.as_ref().ok_or_else(|| {
+        let product = self.product().ok_or_else(|| {
             StoreError::Other("Cannot get packages: product data is null.".into())
         })?;
-
-        // Prefer Products list, fall back to single Product field.
-        let product = listing
-            .products
-            .as_deref()
-            .and_then(|v| v.first())
-            .or(listing.product.as_ref())
-            .ok_or_else(|| {
-                StoreError::Other("Cannot get packages: product data is null.".into())
-            })?;
-
-        let wu_category_id = product
-            .display_sku_availabilities
-            .as_deref()
-            .and_then(|v| v.first())
-            .and_then(|dsa| dsa.sku.as_ref())
-            .and_then(|sku| sku.properties.as_ref())
-            .and_then(|props| props.fulfillment_data.as_ref())
-            .and_then(|fd| fd.wu_category_id.as_deref())
-            .ok_or_else(|| {
-                StoreError::Other(
-                    "Cannot get packages: FulfillmentData (WuCategoryId) is missing.".into(),
-                )
-            })?;
+        let wu_category_id = self.wu_category_id().ok_or_else(|| {
+            StoreError::Other(
+                "Cannot get packages: FulfillmentData (WuCategoryId) is missing.".into(),
+            )
+        })?;
 
         debug!("FE3: WuCategoryId={wu_category_id}");
-        self.emit("fe3.start", format!("WuCategoryId={wu_category_id}"));
+        self.progress
+            .emit("fe3.start", format!("WuCategoryId={wu_category_id}"));
 
-        self.emit("fe3.getCookie", "POST GetCookie");
+        self.progress.emit("fe3.getCookie", "POST GetCookie");
         let cookie = FE3Handler::get_cookie(&self.client).await?;
 
-        self.emit("fe3.syncUpdates", format!("cookie {} bytes", cookie.len()));
+        self.progress
+            .emit("fe3.syncUpdates", format!("cookie {} bytes", cookie.len()));
         let xml =
             FE3Handler::sync_updates_with_cookie(&cookie, wu_category_id, msa_token, &self.client)
                 .await?;
 
-        self.emit("fe3.parseUpdateIds", format!("{} bytes XML", xml.len()));
+        self.progress
+            .emit("fe3.parseUpdateIds", format!("{} bytes XML", xml.len()));
         let (update_ids, revision_ids) = FE3Handler::process_update_ids(&xml)?;
         debug!("FE3: {} update ID(s) parsed", update_ids.len());
-        self.emit_counter(
+        self.progress.emit_counter(
             "fe3.parseUpdateIds.done",
             "update IDs parsed",
             update_ids.len() as u32,
             update_ids.len() as u32,
         );
 
-        self.emit("fe3.parsePackages", "parsing package instances");
+        self.progress
+            .emit("fe3.parsePackages", "parsing package instances");
         let mut instances = FE3Handler::get_package_instances(&xml).await?;
         debug!("FE3: {} package instance(s) found", instances.len());
-        self.emit_counter(
+        self.progress.emit_counter(
             "fe3.parsePackages.done",
             "package instances parsed",
             instances.len() as u32,
@@ -765,7 +763,7 @@ impl DisplayCatalogHandler {
         let total_pkgs = instances.len() as u32;
         for (i, inst) in instances.iter().enumerate() {
             let uid = update_ids.get(i).map(String::as_str).unwrap_or("");
-            self.emit_counter(
+            self.progress.emit_counter(
                 "fe3.packageFound",
                 format!("{} | updateId={}", inst.package_moniker, uid),
                 (i + 1) as u32,
@@ -773,7 +771,7 @@ impl DisplayCatalogHandler {
             );
         }
 
-        self.emit(
+        self.progress.emit(
             "fe3.resolveUrls",
             format!("resolving {} URLs", update_ids.len()),
         );
@@ -791,7 +789,7 @@ impl DisplayCatalogHandler {
         // the owning package's moniker so the UI can light up the matching
         // row. Message format:
         //   "<moniker> | uri=<url> | digest=<sha1-or-?> | updateId=<id>"
-        let progress = self.progress.as_ref();
+        let progress = &self.progress;
         let total_req = update_ids.len();
         let per_update_locs = FE3Handler::get_file_locations_with_progress(
             &update_ids,
@@ -799,23 +797,20 @@ impl DisplayCatalogHandler {
             msa_token,
             &self.client,
             |idx, total, update_id, loc| {
-                let Some(cb) = progress else {
-                    return;
-                };
                 let moniker = moniker_by_update_id
                     .get(update_id)
                     .copied()
                     .unwrap_or("<unknown>");
-                cb(ProgressEvent {
-                    stage: "fe3.linkReceived",
-                    message: format!(
+                progress.emit_counter(
+                    "fe3.linkReceived",
+                    format!(
                         "{moniker} | uri={} | digest={} | updateId={update_id}",
                         loc.url,
                         loc.digest.as_deref().unwrap_or("?"),
                     ),
-                    current: Some((idx + 1) as u32),
-                    total: Some(total as u32),
-                });
+                    (idx + 1) as u32,
+                    total as u32,
+                );
             },
         )
         .await?;
@@ -825,7 +820,7 @@ impl DisplayCatalogHandler {
             total_urls,
             per_update_locs.len(),
         );
-        self.emit_counter(
+        self.progress.emit_counter(
             "fe3.resolveUrls.done",
             "URLs resolved",
             total_urls as u32,
@@ -853,10 +848,6 @@ impl DisplayCatalogHandler {
             })
             .collect();
 
-        // Demoted to debug so we don't spam stdout unconditionally — callers
-        // who want a live view should subscribe to the per-package emit
-        // events above (fe3.packageFound / fe3.linkReceived /
-        // fe3.packageResolved).
         debug!("DCat size map ({} entries):", dcat_size_map.len());
         for (name, size) in &dcat_size_map {
             debug!("  DCat package: {name} = {size} bytes");
@@ -906,7 +897,7 @@ impl DisplayCatalogHandler {
                     .copied(),
                 instance.all_file_locations.len(),
             );
-            self.emit_counter(
+            self.progress.emit_counter(
                 "fe3.packageResolved",
                 format!(
                     "{} | uri={} | size={} | digest={} | locs={} | updateId={}",
@@ -926,7 +917,7 @@ impl DisplayCatalogHandler {
         }
 
         info!("Resolved {} package(s)", instances.len());
-        self.emit(
+        self.progress.emit(
             "fe3.done",
             format!("{} package(s) resolved", instances.len()),
         );
@@ -1012,24 +1003,26 @@ impl DisplayCatalogHandler {
         }
 
         debug!("DCat search: GET {url}");
-        self.emit("search.request", format!("\"{query}\""));
+        self.progress.emit("search.request", format!("\"{query}\""));
 
         let response = send_with_retry(
             || self.client.get(&url),
             &self.config,
             None,
-            |stage, msg| self.emit(stage, msg),
+            |stage, msg| self.progress.emit(stage, msg),
         )
         .await?;
 
         let status = response.status();
         debug!("DCat search response: HTTP {status}");
-        self.emit("search.response", format!("HTTP {status}"));
+        self.progress
+            .emit("search.response", format!("HTTP {status}"));
 
         if status.is_success() {
             let body = response.text().await.map_err(StoreError::Http)?;
             debug!("DCat search response body: {} bytes", body.len());
-            self.emit("search.parse", format!("{} bytes", body.len()));
+            self.progress
+                .emit("search.parse", format!("{} bytes", body.len()));
             self.result = Some(DisplayCatalogResult::Found);
             let result: DCatSearch = serde_json::from_str(&body).map_err(|e| {
                 error!("DCat search JSON parse error: {e}");
@@ -1038,7 +1031,8 @@ impl DisplayCatalogHandler {
             })?;
             let count = result.total_result_count.unwrap_or(0);
             info!("DCat search: {count} result(s) for \"{query}\"");
-            self.emit("search.done", format!("{count} result(s)"));
+            self.progress
+                .emit("search.done", format!("{count} result(s)"));
             Ok(result)
         } else {
             let body = response.text().await.unwrap_or_default();
@@ -1617,14 +1611,15 @@ mod tests {
         let log = Arc::new(Mutex::new(Vec::<ProgressEvent>::new()));
         let log_cb = log.clone();
         let mut h = DisplayCatalogHandler::production();
-        h.set_progress_callback(Box::new(move |e| log_cb.lock().unwrap().push(e)));
+        h.progress
+            .set(Box::new(move |e| log_cb.lock().unwrap().push(e)));
         (h, log)
     }
 
     #[test]
     fn emit_invokes_callback() {
         let (h, log) = capturing_handler();
-        h.emit("dcat.request", "GET id=foo");
+        h.progress.emit("dcat.request", "GET id=foo");
         let events = log.lock().unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].stage, "dcat.request");
@@ -1636,7 +1631,8 @@ mod tests {
     #[test]
     fn emit_counter_carries_progress_numbers() {
         let (h, log) = capturing_handler();
-        h.emit_counter("fe3.resolveUrls.done", "URLs resolved", 5, 12);
+        h.progress
+            .emit_counter("fe3.resolveUrls.done", "URLs resolved", 5, 12);
         let events = log.lock().unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].stage, "fe3.resolveUrls.done");
@@ -1647,10 +1643,10 @@ mod tests {
     #[test]
     fn multiple_emits_preserve_order() {
         let (h, log) = capturing_handler();
-        h.emit("dcat.request", "step 1");
-        h.emit("dcat.response", "step 2");
-        h.emit_counter("dcat.parse", "step 3", 1, 1);
-        h.emit("dcat.done", "step 4");
+        h.progress.emit("dcat.request", "step 1");
+        h.progress.emit("dcat.response", "step 2");
+        h.progress.emit_counter("dcat.parse", "step 3", 1, 1);
+        h.progress.emit("dcat.done", "step 4");
         let stages: Vec<&str> = log.lock().unwrap().iter().map(|e| e.stage).collect();
         assert_eq!(
             stages,
@@ -1662,16 +1658,16 @@ mod tests {
     fn no_callback_means_no_panic() {
         // Without a callback installed, emit must be a no-op.
         let h = DisplayCatalogHandler::production();
-        h.emit("x", "y");
-        h.emit_counter("x", "y", 1, 1);
+        h.progress.emit("x", "y");
+        h.progress.emit_counter("x", "y", 1, 1);
     }
 
     #[test]
     fn clear_callback_stops_delivery() {
         let (mut h, log) = capturing_handler();
-        h.emit("first", "");
-        h.clear_progress_callback();
-        h.emit("second", "");
+        h.progress.emit("first", "");
+        h.progress.clear();
+        h.progress.emit("second", "");
         let events = log.lock().unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].stage, "first");
@@ -1684,12 +1680,12 @@ mod tests {
         let mut h = DisplayCatalogHandler::production();
 
         let a = log_a.clone();
-        h.set_progress_callback(Box::new(move |e| a.lock().unwrap().push(e)));
-        h.emit("first", "");
+        h.progress.set(Box::new(move |e| a.lock().unwrap().push(e)));
+        h.progress.emit("first", "");
 
         let b = log_b.clone();
-        h.set_progress_callback(Box::new(move |e| b.lock().unwrap().push(e)));
-        h.emit("second", "");
+        h.progress.set(Box::new(move |e| b.lock().unwrap().push(e)));
+        h.progress.emit("second", "");
 
         assert_eq!(log_a.lock().unwrap().len(), 1);
         assert_eq!(log_a.lock().unwrap()[0].stage, "first");

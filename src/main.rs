@@ -19,10 +19,12 @@ mod cli {
     /// search request/response, etc.) at info-level so the user sees a live
     /// trace of what the handler is doing.
     fn install_progress(handler: &mut DisplayCatalogHandler) {
-        handler.set_progress_callback(Box::new(|e: ProgressEvent| match (e.current, e.total) {
-            (Some(c), Some(t)) => log::info!("[{}] {}/{} — {}", e.stage, c, t, e.message),
-            _ => log::info!("[{}] {}", e.stage, e.message),
-        }));
+        handler
+            .progress
+            .set(Box::new(|e: ProgressEvent| match (e.current, e.total) {
+                (Some(c), Some(t)) => log::info!("[{}] {}/{} — {}", e.stage, c, t, e.message),
+                _ => log::info!("[{}] {}", e.stage, e.message),
+            }));
     }
 
     /// Log an error with its full `source()` chain plus a forced backtrace.

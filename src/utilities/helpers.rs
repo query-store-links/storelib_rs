@@ -73,27 +73,11 @@ pub fn create_dcat_uri(
     let base = endpoint_to_base_url(endpoint);
     let trail = locale.dcat_trail();
 
-    match id_type {
-        IdentifierType::ProductId =>
-            format!("{}{id}?{trail}&fieldsTemplate=Details", base),
-
-        IdentifierType::XboxTitleId =>
-            format!("{}lookup?alternateId=XboxTitleID&Value={id}&{trail}&fieldsTemplate=Details", base),
-
-        IdentifierType::PackageFamilyName =>
-            format!("{}lookup?alternateId=PackageFamilyName&Value={id}&{trail}&fieldsTemplate=Details", base),
-
-        IdentifierType::ContentId =>
-            format!("{}lookup?alternateId=CONTENTID&Value={id}&{trail}&fieldsTemplate=Details", base),
-
-        IdentifierType::LegacyWindowsPhoneProductId =>
-            format!("{}lookup?alternateId=LegacyWindowsPhoneProductID&Value={id}&{trail}&fieldsTemplate=Details", base),
-
-        IdentifierType::LegacyWindowsStoreProductId =>
-            format!("{}lookup?alternateId=LegacyWindowsStoreProductID&Value={id}&{trail}&fieldsTemplate=Details", base),
-
-        IdentifierType::LegacyXboxProductId =>
-            format!("{}lookup?alternateId=LegacyXboxProductID&Value={id}&{trail}&fieldsTemplate=Details", base),
+    match id_type.dcat_alternate_id_name() {
+        None => format!("{base}{id}?{trail}&fieldsTemplate=Details"),
+        Some(alt) => {
+            format!("{base}lookup?alternateId={alt}&Value={id}&{trail}&fieldsTemplate=Details")
+        }
     }
 }
 

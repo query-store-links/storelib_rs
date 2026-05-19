@@ -53,7 +53,7 @@ pub use models::search::{DCatSearch, SearchResult};
 
 // services
 pub use services::display_catalog::{
-    ClientConfig, DisplayCatalogHandler, ProgressCallback, ProgressEvent,
+    ClientConfig, DisplayCatalogHandler, ProgressCallback, ProgressEmitter, ProgressEvent,
 };
 pub use services::fe3::FE3Handler;
 

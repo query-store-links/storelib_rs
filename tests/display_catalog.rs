@@ -371,7 +371,7 @@ async fn progress_callback_fires_expected_query_stages() {
     let mut handler = make_handler();
     let log: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(Vec::new()));
     let log_cb = log.clone();
-    handler.set_progress_callback(Box::new(move |e: ProgressEvent| {
+    handler.progress.set(Box::new(move |e: ProgressEvent| {
         log_cb.lock().unwrap().push(e.stage);
     }));
 
@@ -416,7 +416,7 @@ async fn progress_callback_fires_fe3_stages_during_package_resolution() {
 
     let log: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(Vec::new()));
     let log_cb = log.clone();
-    handler.set_progress_callback(Box::new(move |e: ProgressEvent| {
+    handler.progress.set(Box::new(move |e: ProgressEvent| {
         log_cb.lock().unwrap().push(e.stage);
     }));
 

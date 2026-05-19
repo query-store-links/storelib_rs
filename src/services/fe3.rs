@@ -1,5 +1,6 @@
 use crate::error::StoreError;
 use crate::models::fe3::{ApplicabilityBlob, DigestEntry, PackageInstance, ResolvedFileLocation};
+use crate::services::display_catalog::ProgressEmitter;
 use crate::utilities::helpers::string_to_package_type;
 use log::{debug, trace, warn};
 
@@ -27,12 +28,60 @@ const MSA_TOKEN: &str = "<Device>dAA9AEUAdwBBAHcAQQBzAE4AMwBCAEEAQQBVADEAYgB5AHM
 UAA3AHoATwArAGYARwBrAHgAVgBtACsAVQBmAFoAYgBRADUANQBzAHcARQA9ACYAcAA9AA==</Device>";
 
 // ---------------------------------------------------------------------------
-// FE3 handler (all associated functions – no instance state required)
+// FE3 handler
 // ---------------------------------------------------------------------------
+//
+// Construct via [`FE3Handler::new`] for stored-callback progress
+// (`fe3.linkReceived` per resolved URL via [`Self::get_file_urls`]); reach
+// for the static `_with_progress` associated functions when the caller has
+// its own enriched closure (e.g. `DisplayCatalogHandler::get_packages_for_product`
+// attaches the owning moniker to each link event).
 
-pub struct FE3Handler;
+pub struct FE3Handler {
+    pub(crate) client: reqwest::Client,
+    /// Subscribe with `fe3.progress.set(Box::new(|e| ...))`.
+    pub progress: ProgressEmitter,
+}
 
 impl FE3Handler {
+    pub fn new(client: reqwest::Client) -> Self {
+        Self {
+            client,
+            progress: ProgressEmitter::new(),
+        }
+    }
+
+    /// Resolve direct download URLs for `(update_ids, revision_ids)`,
+    /// firing one `fe3.linkReceived` event per resolved URL through
+    /// [`Self::progress`]. `size` in the returned tuples is always `None`
+    /// (FE3 only carries per-URL sizes in `SyncUpdates`).
+    pub async fn get_file_urls(
+        &self,
+        update_ids: &[String],
+        revision_ids: &[String],
+        msa_token: Option<&str>,
+    ) -> Result<Vec<(String, Option<i64>)>, StoreError> {
+        let emitter = &self.progress;
+        Self::get_file_urls_with_progress(
+            update_ids,
+            revision_ids,
+            msa_token,
+            &self.client,
+            |idx, total, update_id, url, size| {
+                emitter.emit_counter(
+                    "fe3.linkReceived",
+                    format!(
+                        "uri={url} | size={} | updateId={update_id}",
+                        size.map(|s| s.to_string()).unwrap_or_else(|| "?".into()),
+                    ),
+                    (idx + 1) as u32,
+                    total as u32,
+                );
+            },
+        )
+        .await
+    }
+
     // -----------------------------------------------------------------------
     // Cookie
     // -----------------------------------------------------------------------
@@ -233,22 +282,23 @@ impl FE3Handler {
 
             // ----- Per-binary <File> attributes + child digests ---------
             let primary_file = primary_file_by_moniker.get(&moniker).copied();
+            let file_str = |name: &str| {
+                primary_file
+                    .and_then(|f| f.attribute(name))
+                    .map(String::from)
+            };
+            let file_i64 = |name: &str| {
+                primary_file
+                    .and_then(|f| f.attribute(name))
+                    .and_then(|s| s.parse::<i64>().ok())
+            };
+
             let file_name = primary_file.and_then(|f| f.attribute("FileName"));
-            let digest = primary_file
-                .and_then(|f| f.attribute("Digest"))
-                .map(String::from);
-            let digest_algorithm = primary_file
-                .and_then(|f| f.attribute("DigestAlgorithm"))
-                .map(String::from);
-            let file_size_attr = primary_file
-                .and_then(|f| f.attribute("Size"))
-                .and_then(|s| s.parse::<i64>().ok());
-            let modified = primary_file
-                .and_then(|f| f.attribute("Modified"))
-                .map(String::from);
-            let patching_type = primary_file
-                .and_then(|f| f.attribute("PatchingType"))
-                .map(String::from);
+            let digest = file_str("Digest");
+            let digest_algorithm = file_str("DigestAlgorithm");
+            let file_size_attr = file_i64("Size");
+            let modified = file_str("Modified");
+            let patching_type = file_str("PatchingType");
 
             let mut additional_digests: Vec<DigestEntry> = Vec::new();
             let mut pieces_hash_digest: Option<DigestEntry> = None;
@@ -289,45 +339,31 @@ impl FE3Handler {
                     .find(|c| c.tag_name().name() == "ExtendedProperties")
             });
 
-            let handler = ext_props
-                .and_then(|n| n.attribute("Handler"))
-                .map(String::from);
-            let is_appx_framework = ext_props
-                .and_then(|n| n.attribute("IsAppxFramework"))
-                .and_then(|v| v.parse::<bool>().ok());
-            let max_download_size = ext_props
-                .and_then(|n| n.attribute("MaxDownloadSize"))
-                .and_then(|s| s.parse::<i64>().ok());
-            let min_download_size = ext_props
-                .and_then(|n| n.attribute("MinDownloadSize"))
-                .and_then(|s| s.parse::<i64>().ok());
-            let package_content_id = ext_props
-                .and_then(|n| n.attribute("PackageContentId"))
-                .map(String::from);
-            let package_identity_name = ext_props
-                .and_then(|n| n.attribute("PackageIdentityName"))
-                .map(String::from);
-            let creation_date = ext_props
-                .and_then(|n| n.attribute("CreationDate"))
-                .map(String::from);
-            let content_type = ext_props
-                .and_then(|n| n.attribute("ContentType"))
-                .map(String::from);
-            let mandatory_version = ext_props
-                .and_then(|n| n.attribute("MandatoryVersion"))
-                .map(String::from);
-            let mandatory_date = ext_props
-                .and_then(|n| n.attribute("MandatoryDate"))
-                .map(String::from);
-            let default_properties_language = ext_props
-                .and_then(|n| n.attribute("DefaultPropertiesLanguage"))
-                .map(String::from);
-            let from_store_service = ext_props
-                .and_then(|n| n.attribute("FromStoreService"))
-                .and_then(|v| v.parse::<bool>().ok());
-            let legacy_mobile_product_id = ext_props
-                .and_then(|n| n.attribute("LegacyMobileProductId"))
-                .map(String::from);
+            let ext_str = |name: &str| ext_props.and_then(|n| n.attribute(name)).map(String::from);
+            let ext_bool = |name: &str| {
+                ext_props
+                    .and_then(|n| n.attribute(name))
+                    .and_then(|v| v.parse::<bool>().ok())
+            };
+            let ext_i64 = |name: &str| {
+                ext_props
+                    .and_then(|n| n.attribute(name))
+                    .and_then(|s| s.parse::<i64>().ok())
+            };
+
+            let handler = ext_str("Handler");
+            let is_appx_framework = ext_bool("IsAppxFramework");
+            let max_download_size = ext_i64("MaxDownloadSize");
+            let min_download_size = ext_i64("MinDownloadSize");
+            let package_content_id = ext_str("PackageContentId");
+            let package_identity_name = ext_str("PackageIdentityName");
+            let creation_date = ext_str("CreationDate");
+            let content_type = ext_str("ContentType");
+            let mandatory_version = ext_str("MandatoryVersion");
+            let mandatory_date = ext_str("MandatoryDate");
+            let default_properties_language = ext_str("DefaultPropertiesLanguage");
+            let from_store_service = ext_bool("FromStoreService");
+            let legacy_mobile_product_id = ext_str("LegacyMobileProductId");
 
             let main_package = update_xml
                 .and_then(|xml_node| {
@@ -393,32 +429,16 @@ impl FE3Handler {
     // -----------------------------------------------------------------------
 
     /// For each `(update_id, revision_id)` pair, POST a
-    /// `GetExtendedUpdateInfo2` SOAP request to FE3 and collect the
-    /// first non-blockmap URL per response.
+    /// `GetExtendedUpdateInfo2` SOAP request to FE3 and fire `on_url` once
+    /// per successfully-resolved (non-blockmap) URL **as soon as the SOAP
+    /// response is parsed**, before the next request goes out. Returns
+    /// `Vec<(url, size_or_none)>` keyed parallel to the inputs.
     ///
-    /// This is a thin wrapper over [`Self::get_file_locations`] that picks
-    /// the primary URL and discards the rest. Use `get_file_locations` if
-    /// you need the alternate (signed) URL or per-URL digests.
-    pub async fn get_file_urls(
-        update_ids: &[String],
-        revision_ids: &[String],
-        msa_token: Option<&str>,
-        client: &reqwest::Client,
-    ) -> Result<Vec<(String, Option<i64>)>, StoreError> {
-        Self::get_file_urls_with_progress(
-            update_ids,
-            revision_ids,
-            msa_token,
-            client,
-            |_idx, _total, _update_id, _url, _size| {},
-        )
-        .await
-    }
-
-    /// Variant of [`Self::get_file_urls`] that fires `on_url` once per
-    /// successfully-resolved (non-blockmap) URL **as soon as the SOAP
-    /// response is parsed**, before the next request goes out. Use this to
-    /// stream live per-link updates to a UI.
+    /// Use this static when you need a custom per-link closure (e.g. the
+    /// DCat path attaches the owning package's moniker). For the common
+    /// case where `fe3.linkReceived` events should flow through a
+    /// pre-installed handler-level callback, use the instance method
+    /// [`Self::get_file_urls`] instead.
     ///
     /// Callback args: `(request_idx, request_total, update_id, url, size)`.
     /// `size` is always `None` — FE3 does not return per-URL sizes in
@@ -460,10 +480,12 @@ impl FE3Handler {
             .collect())
     }
 
-    /// Rich variant of [`Self::get_file_urls`] that returns *every*
-    /// `<FileLocation>` for each update — primary binary, blockmap, and
-    /// signed alternative — along with the per-URL `<FileDigest>` so
-    /// callers can match a URL back to its `<File>` entry.
+    /// Rich variant of [`Self::get_file_urls_with_progress`] that returns
+    /// *every* `<FileLocation>` for each update — primary binary, blockmap,
+    /// and signed alternative — along with the per-URL `<FileDigest>` so
+    /// callers can match a URL back to its `<File>` entry. Fires `on_loc`
+    /// once per resolved `<FileLocation>` as soon as the SOAP response is
+    /// parsed.
     ///
     /// Returns a `Vec` indexed parallel to `update_ids`: each inner `Vec`
     /// is the file locations FE3 returned for that update, in document
@@ -471,24 +493,6 @@ impl FE3Handler {
     /// caller (match `digest` against `PackageInstance::digest` to pick
     /// the binary, or against `PackageInstance::block_map_digest` to pick
     /// the blockmap).
-    pub async fn get_file_locations(
-        update_ids: &[String],
-        revision_ids: &[String],
-        msa_token: Option<&str>,
-        client: &reqwest::Client,
-    ) -> Result<Vec<Vec<ResolvedFileLocation>>, StoreError> {
-        Self::get_file_locations_with_progress(
-            update_ids,
-            revision_ids,
-            msa_token,
-            client,
-            |_, _, _, _| {},
-        )
-        .await
-    }
-
-    /// Same as [`Self::get_file_locations`] but fires `on_loc` once per
-    /// resolved `<FileLocation>` as soon as the SOAP response is parsed.
     ///
     /// Callback args: `(request_idx, request_total, update_id, &location)`.
     pub async fn get_file_locations_with_progress<F>(
