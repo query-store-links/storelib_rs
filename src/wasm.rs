@@ -198,505 +198,13 @@ pub fn wasm_init() {
 // TypeScript declarations
 // ---------------------------------------------------------------------------
 //
-// These are emitted verbatim into the generated `.d.ts`, so JS consumers see
-// real types (not `any`) for the values that cross the wasm-bindgen boundary.
-
+// Generated at build time by `tools/gen-ts.mjs` (run from `build.rs`) from
+// every `#[derive(Serialize)]` struct and enum on the wasm surface, plus the
+// `ProgressStage` union scraped from `.emit()` call sites and the
+// `StorelibError` shape derived from `store_err`'s match arms. To regenerate
+// without a full build:  node tools/gen-ts.mjs
 #[wasm_bindgen(typescript_custom_section)]
-const TS_APPEND_CONTENT: &'static str = r#"
-
-/* IMPORTANT — BigInt for large numbers
- * ------------------------------------
- * Microsoft Store occasionally returns 64-bit integers that exceed
- * `Number.MAX_SAFE_INTEGER` (2⁵³ − 1), e.g. usage counters such as
- * `ratingCount`, `purchaseCount`, `playCount`. To keep precision, every
- * 64-bit-integer field in this surface is emitted as a JS `bigint`. The
- * declarations below mark those as `number | bigint | null`. To send the
- * value back through `JSON.stringify`, install a BigInt-aware replacer:
- *     JSON.stringify(v, (_k, v) => typeof v === 'bigint' ? v.toString() : v);
- */
-
-/** Two-letter ISO 3166-1 alpha-2 market code (e.g. "US", "JP"). */
-export type MarketCode = string;
-
-/** Two-letter ISO 639-1 language code (e.g. "en", "zh"). */
-export type LanguageCode = string;
-
-/** Microsoft Store BCP-47 language tag (e.g. "en-US", "zh-Hant-TW"). */
-export type LanguageTagCode = string;
-
-/** A code/name pair returned by `listMarkets`, `listLanguages`,
- *  `listLanguageTags`, and the `parse*` validators. */
-export interface CodeEntry {
-    code: string;
-    englishName: string;
-}
-
-/** Locale JSON shape (also accepted as input by `createDcatUri`). */
-export interface LocaleJson {
-    market: MarketCode;
-    language: LanguageCode;
-    includeNeutral: boolean;
-    /** When true, requests carry `languages=<lang>-<market>` (e.g.
-     *  `en-US`) instead of the bare `<lang>` (e.g. `en`). Microsoft
-     *  returns more fields for the full-tag form — most notably
-     *  `LocalizedProperties[].cmsVideos[]` is empty for `languages=en`
-     *  but populated for `languages=en-US`. Defaults to `true` on
-     *  `Locale.production()`, `false` on `new Locale(...)`. */
-    useFullTag?: boolean;
-}
-
-/** Identifier type accepted by `queryDcat`. `parseIdentifierType` will
- *  canonicalise any common casing into this exact form. */
-export type IdentifierTypeStr =
-    | "productId"
-    | "xboxTitleId"
-    | "packageFamilyName"
-    | "contentId"
-    | "legacyWindowsPhoneProductId"
-    | "legacyWindowsStoreProductId"
-    | "legacyXboxProductId";
-
-/** Microsoft Store DisplayCatalog endpoint identifier. */
-export type DCatEndpointStr =
-    | "production" | "int" | "xbox" | "xboxInt" | "dev" | "oneP" | "onePInt";
-
-/** Device family used for search filtering. */
-export type DeviceFamilyStr =
-    | "desktop" | "mobile" | "xbox" | "serverCore" | "iotCore"
-    | "holoLens" | "andromeda" | "universal" | "wcos";
-
-/** Package format type returned by FE3. */
-export type PackageTypeStr = "uap" | "xap" | "appX" | "unknown";
-
-/** Image purpose / role inside `Product.localizedProperties[].images`. */
-export type ImagePurposeStr =
-    | "logo" | "tile" | "screenshot" | "boxArt" | "brandedKeyArt"
-    | "poster" | "featurePromotionalSquareArt" | "imageGallery"
-    | "superHeroArt" | "titledHeroArt";
-
-/** Top-level Product kind. */
-export type ProductKindStr =
-    | "game" | "application" | "book" | "movie" | "physical" | "software";
-
-/** Per-platform applicability slice inside an `ApplicabilityBlob`. */
-export interface ContentTargetPlatform {
-    "platform.maxVersionTested"?: number | null;
-    "platform.minVersion"?: number | null;
-    "platform.target"?: number | null;
-}
-
-/** FE3 applicability metadata. Keys are passed through verbatim from the
- *  SOAP payload, including the dot-separated names. */
-export interface ApplicabilityBlob {
-    "blob.version"?: number | null;
-    "content.isMain"?: boolean | null;
-    "content.packageId"?: string | null;
-    "content.productId"?: string | null;
-    "content.targetPlatforms"?: ContentTargetPlatform[] | null;
-    "content.type"?: number | null;
-}
-
-/** A named hash returned by FE3 (`AdditionalDigest`, `PiecesHashDigest`,
- *  `BlockMapDigest`). `algorithm` is the wire string (typically
- *  `"SHA1"` or `"SHA256"`); `value` is base64-encoded. */
-export interface DigestEntry {
-    algorithm: string;
-    value: string;
-}
-
-/** One `<FileLocation>` from a `GetExtendedUpdateInfo2` response.
- *  FE3 often returns several per update (binary + blockmap, plus an
- *  optional signed `tlu.dl.delivery.mp.microsoft.com` URL). Match
- *  `digest` against `PackageInstance.digest` /
- *  `PackageInstance.blockMapDigest.value` to identify each. */
-export interface ResolvedFileLocation {
-    url: string;
-    /** Per-URL hash from `<FileDigest>` — base64-encoded SHA1 typically.
-     *  Matches the `Digest` attribute on the owning `<File>`. */
-    digest: string | null;
-}
-
-/** A resolved package instance returned by `getPackagesForProduct`.
- *
- *  Almost every optional field below comes from the FE3 SyncUpdates
- *  response — `<File>` attributes for the per-binary fields,
- *  `<ExtendedProperties>` for the rich package metadata, and
- *  `<AppxPackageInstallData>` for `mainPackage`. Fields are `null` when
- *  the source XML didn't carry the corresponding attribute. */
-export interface PackageInstance {
-    packageMoniker: string;
-    /** Primary download URL — the FE3 `<FileLocation>` whose
-     *  `<FileDigest>` matches the binary's `<File Digest>`. Falls back
-     *  to the first location if no digest match is possible.  See
-     *  `allFileLocations` for the complete URL list (alternate URLs,
-     *  blockmap URLs, etc.). */
-    packageUri: string | null;
-    packageType: PackageTypeStr;
-    applicabilityBlob: ApplicabilityBlob | null;
-    updateId: string;
-    /** Download size in bytes. Sourced from `<File Size>` (SyncUpdates)
-     *  for the primary binary, falling back to
-     *  `<ExtendedProperties MaxDownloadSize>`, then to DisplayCatalog's
-     *  `MaxDownloadSizeInBytes`.
-     *
-     *  Note: i64 on the wire. Renders as `bigint` since 0.1.7-fix-1 so values
-     *  above `Number.MAX_SAFE_INTEGER` survive the crossing. Cast with
-     *  `Number(packageSize)` if you need a JS Number. */
-    packageSize: number | bigint | null;
-    /** FE3's raw `<File FileName="...">` value — typically `<guid>.<ext>`
-     *  (e.g. "1b599478-…-f8c4de1670d4.appxbundle"). Useful for low-level
-     *  matching against the FE3 SOAP response. */
-    fileName: string | null;
-    /** Human-readable filename you can save the package to disk as:
-     *  `<packageMoniker><real extension>`, e.g.
-     *  "4DF9E0F8.Netflix_8.156.0.0_neutral_~_mcm4njqhnhss8.appxbundle".
-     *  Always set; falls back to a `.appx` extension when FE3 didn't
-     *  report a recognised one. Not sanitised for filesystem reserved
-     *  characters — sanitise per-OS before saving. */
-    readableFileName: string;
-
-    // ----- From <AppxMetadata> --------------------------------------
-    /** True if the primary file is a bundle (`.appxbundle` / `.msixbundle`). */
-    isAppxBundle: boolean | null;
-
-    // ----- From <File> attributes (primary binary) ------------------
-    /** Per-binary hash, base64-encoded. Algorithm is in `digestAlgorithm`
-     *  (always `"SHA1"` in current FE3 responses). Use to verify the
-     *  downloaded bytes. */
-    digest: string | null;
-    digestAlgorithm: string | null;
-    /** Last-modified timestamp, ISO 8601. */
-    modified: string | null;
-    /** Present on companion files (blockmaps / CABs); `null` on the
-     *  primary binary. */
-    patchingType: string | null;
-    /** Extra `<AdditionalDigest>` entries — often a SHA256 alongside
-     *  the primary SHA1. */
-    additionalDigests: DigestEntry[];
-    /** `<PiecesHashDigest>` — used for delta / range downloads. */
-    piecesHashDigest: DigestEntry | null;
-    /** `<BlockMapDigest>` — hash of the package's blockmap. */
-    blockMapDigest: DigestEntry | null;
-
-    // ----- From <ExtendedProperties> --------------------------------
-    /** Update handler URI, e.g.
-     *  `"http://schemas.microsoft.com/msus/2002/12/UpdateHandlers/AppxPackage"`. */
-    handler: string | null;
-    /** Authoritative framework flag. Prefer this over moniker-prefix
-     *  heuristics. */
-    isAppxFramework: boolean | null;
-    /** Alternate size sources from FE3 ExtendedProperties. `packageSize`
-     *  is the unified one to read; these are exposed for completeness. */
-    maxDownloadSize: number | bigint | null;
-    minDownloadSize: number | bigint | null;
-    /** Store-side content identifier for this specific package. */
-    packageContentId: string | null;
-    /** PFN base, e.g. `"4DF9E0F8.NETFLIX"`. */
-    packageIdentityName: string | null;
-    creationDate: string | null;
-    contentType: string | null;
-    mandatoryVersion: string | null;
-    mandatoryDate: string | null;
-    defaultPropertiesLanguage: string | null;
-    fromStoreService: boolean | null;
-    legacyMobileProductId: string | null;
-
-    // ----- From <AppxPackageInstallData> ---------------------------
-    /** True for the primary package in a bundle, false for satellites
-     *  (resource / language / scale split packages). */
-    mainPackage: boolean | null;
-
-    // ----- From <FileLocation> (GetExtendedUpdateInfo2) -------------
-    /** Every `<FileLocation>` FE3 returned for this update — binary URL,
-     *  blockmap URL, and (when present) the signed CDN alternative.
-     *  Empty until URLs have been resolved. */
-    allFileLocations: ResolvedFileLocation[];
-}
-
-/** Stage identifier passed to `onProgress`. Stable across releases.
- *
- *  Per-package / per-link fan-out stages fire once per item with
- *  `current`/`total` set, and `message` carrying a pipe-delimited
- *  `key=value` payload so the frontend can correlate a link back to the
- *  package row it belongs to:
- *
- *  - `fe3.packageFound` (after parsing SyncUpdates) —
- *    `"<moniker> | updateId=<id>"`. Fires once per discovered package,
- *    burst-style after the XML parse completes.
- *  - `fe3.linkReceived` (live during URL resolution) —
- *    `"<moniker> | uri=<url> | size=<bytes-or-?> | updateId=<id>"`. Fires
- *    once per resolved URL **as each FE3 SOAP response is parsed**, before
- *    the next request goes out. `updateId` matches the value from the
- *    corresponding `fe3.packageFound` event.
- *  - `fe3.packageResolved` (after the final merge) —
- *    `"<moniker> | uri=<url-or-<none>> | size=<bytes-or-?> | updateId=<id>"`.
- *    Fires once per final `PackageInstance` you'll see in the return
- *    array, with FE3 size falling back to the DCat size.
- *
- *  Parse messages by splitting on `" | "` then on `=`. The leading segment
- *  is always the package moniker (no `key=` prefix). */
-export type ProgressStage =
-    | "dcat.request" | "dcat.response" | "dcat.parse" | "dcat.done" | "dcat.notFound"
-    | "fe3.start" | "fe3.getCookie" | "fe3.syncUpdates"
-    | "fe3.parseUpdateIds" | "fe3.parseUpdateIds.done"
-    | "fe3.parsePackages" | "fe3.parsePackages.done"
-    | "fe3.packageFound"
-    | "fe3.resolveUrls" | "fe3.resolveUrls.done"
-    | "fe3.linkReceived"
-    | "fe3.packageResolved"
-    | "fe3.done"
-    | "search.request" | "search.response" | "search.parse" | "search.done"
-    | "retry.wait" | "retry.attempt";
-
-/** Progress event emitted during long-running operations. */
-export interface ProgressEvent {
-    stage: ProgressStage;
-    message: string;
-    /** "N of M" counter — set on `.done` stages, null otherwise. */
-    current: number | null;
-    total: number | null;
-}
-
-/** Progress callback installed via `DisplayCatalogHandler.onProgress`. */
-export type OnProgress = (event: ProgressEvent) => void;
-
-/** Error thrown by async handler methods. Branch on `.kind` to decide
- *  what to surface to the user.
- *
- *  `causes` is the Rust-side `source()` chain (excluding the top-level
- *  message, which lives in `.message`). For an HTTP failure this is
- *  typically `["error sending request for url …", "tcp connect error: …"]`
- *  etc. Empty when the error has no underlying cause. The JS stack
- *  trace is on `.stack` as usual. */
-export interface StorelibError extends Error {
-    kind:
-        | "http" | "json" | "xml" | "notFound"
-        | "timedOut" | "cancelled" | "other";
-    causes: string[];
-}
-
-/** Top-level DisplayCatalog response. The MS Store schema is large and
- *  loosely typed; consumers typically access well-known fields directly.
- *  This stub keeps the basic shape navigable in TypeScript without
- *  pretending to fully model every field. */
-export interface DisplayCatalogModel {
-    product?: ProductLike | null;
-    products?: ProductLike[] | null;
-    bigIds?: string[] | null;
-    hasMorePages?: boolean | null;
-    totalResultCount?: number | null;
-}
-
-/** Loosely-typed Product shape. Camel-cased throughout. */
-export interface ProductLike {
-    lastModifiedDate?: string | null;
-    localizedProperties?: ProductLocalizedPropertyLike[] | null;
-    properties?: ProductPropertiesLike | null;
-    displaySkuAvailabilities?: DisplaySkuAvailabilityLike[] | null;
-    productKind?: ProductKindStr | string | null;
-    /** Compliance / content-policy escape hatch. Usually `{}`. */
-    productPolicies?: { [k: string]: any } | null;
-    [key: string]: any;
-}
-
-/** Subset of `Product.Properties` with the well-known typed fields
- *  surfaced explicitly. Unknown fields flow through the index
- *  signature. */
-export interface ProductPropertiesLike {
-    canInstallToSDCard?: boolean | null;
-    packageFamilyName?: string | null;
-    packageIdentityName?: string | null;
-    publisherId?: string | null;
-    publisherCertificateName?: string | null;
-    pdpBackgroundColor?: string | null;
-    revisionId?: string | null;
-    hasAddOns?: boolean | null;
-    /** Xbox flags. `xbox` is usually `{}` on non-Xbox products. */
-    xbox?: { [k: string]: any } | null;
-    xboxLiveGoldRequired?: boolean | null;
-    xboxConsoleGenCompatible?: any | null;
-    xboxConsoleGenOptimized?: any | null;
-    xboxCrossGenSetId?: any | null;
-    xboxXPA?: boolean | null;
-    xboxLiveTier?: any | null;
-    /** Opaque escape hatch (string-encoded JSON in `StoreApp`). */
-    extendedClientMetadata?: { [k: string]: any } | null;
-    [key: string]: any;
-}
-
-/** Subset of `DisplaySkuAvailability`. The full `Availability` /
- *  `HistoricalBestAvailability` shape is documented on `Availability`. */
-export interface DisplaySkuAvailabilityLike {
-    sku?: { [k: string]: any } | null;
-    availabilities?: Availability[] | null;
-    /** Prior price/availability snapshots — same shape as
-     *  `availabilities` plus `productASchema`. */
-    historicalBestAvailabilities?: Availability[] | null;
-    [key: string]: any;
-}
-
-export interface ProductLocalizedPropertyLike {
-    productTitle?: string | null;
-    productDescription?: string | null;
-    publisherName?: string | null;
-    language?: string | null;
-    images?: Image[] | null;
-    /** CMS-managed promo videos (separate from `videos`). */
-    cmsVideos?: CmsVideo[] | null;
-    friendlyTitle?: string | null;
-    supportPhone?: string | null;
-    publisherAddress?: string | null;
-    interactive3DEnabled?: boolean | null;
-    interactiveModelConfig?: any | null;
-    [key: string]: any;
-}
-
-/** DCat search response. */
-export interface DCatSearch {
-    results?: SearchResult[] | null;
-    totalResultCount?: number | null;
-}
-
-export interface SearchResult {
-    productFamilyName?: string | null;
-    products?: ProductLike[] | null;
-}
-
-/** Price shape returned by `handler.price` and `handler.prices`. All fields
- *  are optional because MS Store omits them for free/unavailable products. */
-export interface Price {
-    currencyCode?: string | null;
-    isPIRequired?: boolean | null;
-    listPrice?: number | null;
-    msrp?: number | null;
-    taxType?: string | null;
-    wholesaleCurrencyCode?: string | null;
-}
-
-/** Availability slice. Reused for both the live `availabilities[]`
- *  array on a SKU and the parallel `historicalBestAvailabilities[]`
- *  array (which adds `productASchema` and lacks `remediationRequired`). */
-export interface Availability {
-    actions?: string[] | null;
-    availabilityId?: string | null;
-    availabilityASchema?: string | null;
-    availabilityBSchema?: string | null;
-    /** Schema version string — present only on entries inside
-     *  `historicalBestAvailabilities`. */
-    productASchema?: string | null;
-    conditions?: {
-        clientConditions?: { allowedPlatforms?: any[] | null } | null;
-        endDate?: string | null;
-        startDate?: string | null;
-        resourceSetIds?: string[] | null;
-        /** Geographic / regulatory gates, e.g.
-         *  `["CannotSeenByChinaClient"]`. */
-        eligibilityPredicateIds?: string[] | null;
-        /** DCat schema version this availability targets. */
-        supportedCatalogVersion?: number | null;
-        [k: string]: any;
-    } | null;
-    markets?: string[] | null;
-    orderManagementData?: { price?: Price | null; [k: string]: any } | null;
-    properties?: { [k: string]: any } | null;
-    skuId?: string | null;
-    displayRank?: number | null;
-    remediationRequired?: boolean | null;
-    /** Subscription / entitlement-key data. Non-null for paid content. */
-    licensingData?: LicensingData | null;
-    [key: string]: any;
-}
-
-/** Package metadata returned by `handler.packages`. For the resolved
- *  download URLs use `getPackagesForProduct` (returns `PackageInstance[]`). */
-export interface Package {
-    architectures?: string[] | null;
-    languages?: string[] | null;
-    packageFormat?: string | null;
-    packageFamilyName?: string | null;
-    packageFullName?: string | null;
-    packageId?: string | null;
-    packageRank?: number | null;
-    packageUri?: string | null;
-    maxDownloadSizeInBytes?: number | null;
-    maxInstallSizeInBytes?: number | null;
-    version?: string | null;
-    hash?: string | null;
-    hashAlgorithm?: string | null;
-    isStreamingApp?: boolean | null;
-    capabilities?: string[] | null;
-    contentId?: string | null;
-    /** Runtime/library packages this binary depends on. */
-    frameworkDependencies?: FrameworkDependency[] | null;
-    [key: string]: any;
-}
-
-/** Image asset returned by `handler.imagesWithPurpose` and reused inside
- *  `CmsVideo.previewImage`. */
-export interface Image {
-    backgroundColor?: string | null;
-    caption?: string | null;
-    fileSizeInBytes?: number | null;
-    foregroundColor?: string | null;
-    height?: number | null;
-    imagePositionInfo?: string | null;
-    imagePurpose?: string | null;
-    /** Base64-encoded SHA256 of the unscaled source image. Note the
-     *  ALL-CAPS `SHA256` in the key — that's the actual wire form. */
-    unscaledImageSHA256Hash?: string | null;
-    uri?: string | null;
-    width?: number | null;
-    /** EIS (Enterprise/Internal Store) listing identifier. */
-    eisListingIdentifier?: string | null;
-    /** Microsoft asset/CDN file id (numeric string). */
-    fileId?: string | null;
-}
-
-/** CMS-managed promo video attached to a product (typically the "hero
- *  trailer" on the Store listing). Distinct from the generic `Videos`
- *  array on `ProductLocalizedProperty`. */
-export interface CmsVideo {
-    audioEncoding?: string | null;
-    cc?: any | null;
-    cms?: any | null;
-    caption?: string | null;
-    /** MPEG-DASH manifest URL. */
-    dash?: string | null;
-    /** HLS manifest URL. */
-    hls?: string | null;
-    fileSizeInBytes?: number | null;
-    height?: number | null;
-    width?: number | null;
-    previewImage?: Image | null;
-    sortOrder?: number | null;
-    trailerId?: any | null;
-    videoEncoding?: string | null;
-    videoPositionInfo?: string | null;
-    /** e.g. `"HeroTrailer"`, `"Trailer"`. */
-    videoPurpose?: string | null;
-}
-
-/** One entry in `Package.frameworkDependencies` — a runtime/library the
- *  primary binary depends on. */
-export interface FrameworkDependency {
-    maxTested?: any | null;
-    minVersion?: any | null;
-    /** PFN base of the dependency, e.g.
-     *  `"Microsoft.VCLibs.140.00.UWPDesktop"`. */
-    packageIdentity?: string | null;
-}
-
-/** Subscription / entitlement-key data on an `Availability`. Non-null
- *  for paid content; null for free apps. */
-export interface LicensingData {
-    satisfyingEntitlementKeys?: SatisfyingEntitlementKey[] | null;
-}
-
-export interface SatisfyingEntitlementKey {
-    entitlementKeys?: string[] | null;
-    licensingKeyIds?: string[] | null;
-}
-"#;
+const TS_APPEND_CONTENT: &'static str = include_str!(concat!(env!("OUT_DIR"), "/wasm_types.d.ts"));
 
 // ---------------------------------------------------------------------------
 // Free helper functions
@@ -810,7 +318,7 @@ pub fn parse_language_tag_js(tag: &str) -> Result<JsValue, JsError> {
 /// Validate an identifier-type string in any reasonable casing
 /// (`ProductId`, `productId`, `product-id`, `PRODUCT_ID`) and return the
 /// canonical camelCase form used by `queryDcat`. Throws on unknown values.
-#[wasm_bindgen(js_name = parseIdentifierType, unchecked_return_type = "IdentifierTypeStr")]
+#[wasm_bindgen(js_name = parseIdentifierType, unchecked_return_type = "IdentifierType")]
 pub fn parse_identifier_type_js(raw: &str) -> Result<String, JsError> {
     let it = IdentifierType::parse_tolerant(raw)
         .ok_or_else(|| JsError::new(&format!("unknown identifierType: {raw}")))?;
@@ -848,8 +356,8 @@ impl LocaleJs {
     /// to the language list.
     #[wasm_bindgen(constructor)]
     pub fn new(
-        #[wasm_bindgen(unchecked_param_type = "MarketCode")] market: &str,
-        #[wasm_bindgen(unchecked_param_type = "LanguageCode")] language: &str,
+        #[wasm_bindgen(unchecked_param_type = "Market")] market: &str,
+        #[wasm_bindgen(unchecked_param_type = "Lang")] language: &str,
         include_neutral: bool,
     ) -> Result<LocaleJs, JsError> {
         Ok(LocaleJs {
@@ -896,7 +404,7 @@ impl LocaleJs {
     /// ISO 639-1 (`chr-Cher-US`).
     #[wasm_bindgen(js_name = fromTag)]
     pub fn from_tag(
-        #[wasm_bindgen(unchecked_param_type = "LanguageTagCode")] tag: &str,
+        #[wasm_bindgen(unchecked_param_type = "LanguageTag")] tag: &str,
         include_neutral: bool,
     ) -> Result<LocaleJs, JsError> {
         let parsed = LanguageTag::from_str(tag).map_err(|e| JsError::new(&e))?;
@@ -1014,7 +522,7 @@ impl DisplayCatalogHandlerJs {
     pub async fn query_dcat(
         &mut self,
         id: String,
-        #[wasm_bindgen(unchecked_param_type = "IdentifierTypeStr | string")] id_type: String,
+        #[wasm_bindgen(unchecked_param_type = "IdentifierType | string")] id_type: String,
         auth_token: Option<String>,
         #[wasm_bindgen(unchecked_param_type = "AbortSignal | null")] signal: Option<JsValue>,
     ) -> Result<JsValue, JsValue> {
@@ -1064,7 +572,7 @@ impl DisplayCatalogHandlerJs {
     pub async fn search_dcat(
         &mut self,
         query: String,
-        #[wasm_bindgen(unchecked_param_type = "DeviceFamilyStr | string")] device_family: String,
+        #[wasm_bindgen(unchecked_param_type = "DeviceFamily | string")] device_family: String,
         #[wasm_bindgen(unchecked_param_type = "AbortSignal | null")] signal: Option<JsValue>,
     ) -> Result<JsValue, JsValue> {
         let df = parse_device_family(&device_family)?;
@@ -1087,7 +595,7 @@ impl DisplayCatalogHandlerJs {
     pub async fn search_dcat_paged(
         &mut self,
         query: String,
-        #[wasm_bindgen(unchecked_param_type = "DeviceFamilyStr | string")] device_family: String,
+        #[wasm_bindgen(unchecked_param_type = "DeviceFamily | string")] device_family: String,
         skip_count: u32,
         #[wasm_bindgen(unchecked_param_type = "AbortSignal | null")] signal: Option<JsValue>,
     ) -> Result<JsValue, JsValue> {
@@ -1119,7 +627,7 @@ impl DisplayCatalogHandlerJs {
         to_js(&self.inner.search_result).map_err(js_err)
     }
 
-    #[wasm_bindgen(getter, js_name = selectedEndpoint, unchecked_return_type = "DCatEndpointStr")]
+    #[wasm_bindgen(getter, js_name = selectedEndpoint, unchecked_return_type = "DCatEndpoint")]
     pub fn selected_endpoint(&self) -> Result<JsValue, JsError> {
         to_js(&self.inner.selected_endpoint).map_err(js_err)
     }
@@ -1201,7 +709,7 @@ impl DisplayCatalogHandlerJs {
     }
 
     /// All products from the most recent query (single or batch).
-    #[wasm_bindgen(getter, unchecked_return_type = "ProductLike[]")]
+    #[wasm_bindgen(getter, unchecked_return_type = "Product[]")]
     pub fn products(&self) -> Result<JsValue, JsError> {
         to_js(self.inner.products()).map_err(js_err)
     }
@@ -1221,7 +729,7 @@ impl DisplayCatalogHandlerJs {
     /// and `products`.
     #[wasm_bindgen(
         js_name = queryDcatBatch,
-        unchecked_return_type = "ProductLike[]"
+        unchecked_return_type = "Product[]"
     )]
     pub async fn query_dcat_batch(
         &mut self,

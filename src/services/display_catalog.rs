@@ -215,6 +215,7 @@ where
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProgressEvent {
+    /// @ts-type ProgressStage
     pub stage: &'static str,
     pub message: String,
     pub current: Option<u32>,
