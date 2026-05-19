@@ -785,18 +785,19 @@ impl DisplayCatalogHandler {
             .map(|(uid, inst)| (uid.as_str(), inst.package_moniker.as_str()))
             .collect();
 
-        // Stream a `fe3.linkReceived` event the moment each SOAP response is
-        // parsed (i.e. before the next request goes out), enriched with the
-        // owning package's moniker so the UI can light up the matching row.
-        // Message format: `"<moniker> | uri=<url> | size=<bytes-or-?> | updateId=<id>"`.
+        // Stream a `fe3.linkReceived` event the moment each <FileLocation>
+        // is parsed (i.e. before the next request goes out), enriched with
+        // the owning package's moniker so the UI can light up the matching
+        // row. Message format:
+        //   "<moniker> | uri=<url> | digest=<sha1-or-?> | updateId=<id>"
         let progress = self.progress.as_ref();
         let total_req = update_ids.len();
-        let urls = FE3Handler::get_file_urls_with_progress(
+        let per_update_locs = FE3Handler::get_file_locations_with_progress(
             &update_ids,
             &revision_ids,
             msa_token,
             &self.client,
-            |idx, total, update_id, url, size| {
+            |idx, total, update_id, loc| {
                 let Some(cb) = progress else {
                     return;
                 };
@@ -807,8 +808,9 @@ impl DisplayCatalogHandler {
                 cb(ProgressEvent {
                     stage: "fe3.linkReceived",
                     message: format!(
-                        "{moniker} | uri={url} | size={} | updateId={update_id}",
-                        size.map(|s| s.to_string()).unwrap_or_else(|| "?".into()),
+                        "{moniker} | uri={} | digest={} | updateId={update_id}",
+                        loc.url,
+                        loc.digest.as_deref().unwrap_or("?"),
                     ),
                     current: Some((idx + 1) as u32),
                     total: Some(total as u32),
@@ -816,11 +818,16 @@ impl DisplayCatalogHandler {
             },
         )
         .await?;
-        debug!("FE3: {} download URL(s) resolved", urls.len());
+        let total_urls: usize = per_update_locs.iter().map(|v| v.len()).sum();
+        debug!(
+            "FE3: {} download URL(s) resolved across {} update(s)",
+            total_urls,
+            per_update_locs.len(),
+        );
         self.emit_counter(
             "fe3.resolveUrls.done",
             "URLs resolved",
-            urls.len() as u32,
+            total_urls as u32,
             total_req as u32,
         );
 
@@ -860,34 +867,56 @@ impl DisplayCatalogHandler {
 
         for (i, instance) in instances.iter_mut().enumerate() {
             instance.update_id = update_ids.get(i).cloned().unwrap_or_default();
-            if let Some((url, fe3_size)) = urls.get(i) {
-                instance.package_uri = Some(url.clone());
-                instance.file_size = *fe3_size;
-            }
-            // Fall back to DCat size if FE3 didn't provide one
+
+            // Attach every <FileLocation> FE3 returned for this update.
+            let locs = per_update_locs.get(i).cloned().unwrap_or_default();
+
+            // Pick the primary download URL: prefer the one whose FileDigest
+            // matches the binary's <File Digest>, fall back to the first
+            // location. This is more robust than the legacy 99-char URL
+            // heuristic and correctly handles signed/secured alt URLs.
+            instance.package_uri = match instance.digest.as_deref() {
+                Some(want) => locs
+                    .iter()
+                    .find(|l| l.digest.as_deref() == Some(want))
+                    .map(|l| l.url.clone())
+                    .or_else(|| locs.first().map(|l| l.url.clone())),
+                None => locs.first().map(|l| l.url.clone()),
+            };
+            instance.all_file_locations = locs;
+
+            // file_size is already populated by the parser from <File Size>
+            // / <ExtendedProperties MaxDownloadSize>. Only fall back to
+            // DCat when both are missing (rare; mainly for old framework
+            // packages without an ExtendedProperties size).
             if instance.file_size.is_none() {
                 instance.file_size = dcat_size_map
                     .get(instance.package_moniker.as_str())
                     .copied();
             }
+
             debug!(
-                "  package[{i}]: moniker={} fe3_size={:?} dcat_size={:?}",
+                "  package[{i}]: moniker={} digest={:?} size={:?} dcat_size={:?} locs={}",
                 instance.package_moniker,
-                urls.get(i).and_then(|(_, s)| *s),
+                instance.digest,
+                instance.file_size,
                 dcat_size_map
                     .get(instance.package_moniker.as_str())
                     .copied(),
+                instance.all_file_locations.len(),
             );
             self.emit_counter(
                 "fe3.packageResolved",
                 format!(
-                    "{} | uri={} | size={} | updateId={}",
+                    "{} | uri={} | size={} | digest={} | locs={} | updateId={}",
                     instance.package_moniker,
                     instance.package_uri.as_deref().unwrap_or("<none>"),
                     instance
                         .file_size
                         .map(|s| s.to_string())
                         .unwrap_or_else(|| "?".into()),
+                    instance.digest.as_deref().unwrap_or("?"),
+                    instance.all_file_locations.len(),
                     instance.update_id,
                 ),
                 (i + 1) as u32,

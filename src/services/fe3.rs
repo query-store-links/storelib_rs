@@ -1,5 +1,5 @@
 use crate::error::StoreError;
-use crate::models::fe3::{ApplicabilityBlob, PackageInstance};
+use crate::models::fe3::{ApplicabilityBlob, DigestEntry, PackageInstance, ResolvedFileLocation};
 use crate::utilities::helpers::string_to_package_type;
 use log::{debug, trace, warn};
 
@@ -171,32 +171,32 @@ impl FE3Handler {
     /// Parse `AppxMetadata` nodes from the `SyncUpdates` XML and build
     /// [`PackageInstance`] values (without resolved download URLs).
     ///
-    /// The sibling `<File InstallerSpecificIdentifier="..." FileName="..."/>`
-    /// element carries the canonical filename (e.g. `<guid>.appxbundle`); we
-    /// match by `InstallerSpecificIdentifier == PackageMoniker` and stash
-    /// the value on [`PackageInstance::file_name`] so callers can derive
-    /// the correct download extension without guessing.
+    /// Walks three structures and stitches them together by moniker:
+    /// - `<AppxMetadata PackageMoniker="...">` — package identity + type +
+    ///   `<ApplicabilityBlob>` JSON.
+    /// - The rich `<Update>` block whose `<Files>/<File>` has
+    ///   `InstallerSpecificIdentifier == PackageMoniker` — primary-binary
+    ///   hash/size/timestamp plus the parent `<ExtendedProperties>` and
+    ///   `<HandlerSpecificData>/<AppxPackageInstallData>` siblings.
+    /// - Child digest tags (`AdditionalDigest`, `PiecesHashDigest`,
+    ///   `BlockMapDigest`) under the primary `<File>`.
     pub async fn get_package_instances(xml: &str) -> Result<Vec<PackageInstance>, StoreError> {
         let doc = roxmltree::Document::parse(xml).map_err(|e| StoreError::Xml(e.to_string()))?;
 
-        // First pass: build moniker → filename lookup from every <File> node.
-        let mut filename_by_moniker: std::collections::HashMap<String, String> =
+        // First pass: index every <File> by its InstallerSpecificIdentifier
+        // (which equals PackageMoniker). Blockmap entries (Abm_*.cab) have
+        // no InstallerSpecificIdentifier so they don't enter the index; the
+        // primary binary wins by construction.
+        let mut primary_file_by_moniker: std::collections::HashMap<String, roxmltree::Node> =
             std::collections::HashMap::new();
         for node in doc.descendants() {
             if node.tag_name().name() != "File" {
                 continue;
             }
-            if let (Some(moniker), Some(filename)) = (
-                node.attribute("InstallerSpecificIdentifier"),
-                node.attribute("FileName"),
-            ) {
-                // Skip blockmap files — they share the moniker but use the
-                // primary file's `FileName` should always win. The first
-                // <File> for a given moniker is the binary; subsequent ones
-                // (blockmap, etc.) we ignore via `entry().or_insert`.
-                filename_by_moniker
+            if let Some(moniker) = node.attribute("InstallerSpecificIdentifier") {
+                primary_file_by_moniker
                     .entry(moniker.to_owned())
-                    .or_insert_with(|| filename.to_owned());
+                    .or_insert(node);
             }
         }
 
@@ -218,6 +218,9 @@ impl FE3Handler {
             };
             let pkg_type_str = node.attribute("PackageType").unwrap_or("");
             let pkg_type = string_to_package_type(pkg_type_str);
+            let is_appx_bundle = node
+                .attribute("IsAppxBundle")
+                .and_then(|v| v.parse::<bool>().ok());
 
             debug!("FE3: package instance moniker={moniker} type={pkg_type_str}");
 
@@ -228,9 +231,119 @@ impl FE3Handler {
                     serde_json::from_str(t).ok()
                 });
 
-            let file_name = filename_by_moniker.get(&moniker).cloned();
-            let readable_file_name =
-                PackageInstance::build_readable_file_name(&moniker, file_name.as_deref());
+            // ----- Per-binary <File> attributes + child digests ---------
+            let primary_file = primary_file_by_moniker.get(&moniker).copied();
+            let file_name = primary_file.and_then(|f| f.attribute("FileName"));
+            let digest = primary_file
+                .and_then(|f| f.attribute("Digest"))
+                .map(String::from);
+            let digest_algorithm = primary_file
+                .and_then(|f| f.attribute("DigestAlgorithm"))
+                .map(String::from);
+            let file_size_attr = primary_file
+                .and_then(|f| f.attribute("Size"))
+                .and_then(|s| s.parse::<i64>().ok());
+            let modified = primary_file
+                .and_then(|f| f.attribute("Modified"))
+                .map(String::from);
+            let patching_type = primary_file
+                .and_then(|f| f.attribute("PatchingType"))
+                .map(String::from);
+
+            let mut additional_digests: Vec<DigestEntry> = Vec::new();
+            let mut pieces_hash_digest: Option<DigestEntry> = None;
+            let mut block_map_digest: Option<DigestEntry> = None;
+            if let Some(file) = primary_file {
+                for child in file.children() {
+                    if !child.is_element() {
+                        continue;
+                    }
+                    let alg = child.attribute("Algorithm").unwrap_or("").to_string();
+                    let val = child.text().unwrap_or("").trim().to_string();
+                    if val.is_empty() {
+                        continue;
+                    }
+                    let entry = DigestEntry {
+                        algorithm: alg,
+                        value: val,
+                    };
+                    match child.tag_name().name() {
+                        "AdditionalDigest" => additional_digests.push(entry),
+                        "PiecesHashDigest" => pieces_hash_digest = Some(entry),
+                        "BlockMapDigest" => block_map_digest = Some(entry),
+                        _ => {}
+                    }
+                }
+            }
+
+            // ----- Walk up to the owning <Update>/<Xml> to pick up
+            //       ExtendedProperties + AppxPackageInstallData siblings.
+            // File -> Files -> Xml -> Update
+            let update_xml = primary_file
+                .and_then(|f| f.parent())
+                .and_then(|files| files.parent());
+
+            let ext_props = update_xml.and_then(|xml_node| {
+                xml_node
+                    .children()
+                    .find(|c| c.tag_name().name() == "ExtendedProperties")
+            });
+
+            let handler = ext_props
+                .and_then(|n| n.attribute("Handler"))
+                .map(String::from);
+            let is_appx_framework = ext_props
+                .and_then(|n| n.attribute("IsAppxFramework"))
+                .and_then(|v| v.parse::<bool>().ok());
+            let max_download_size = ext_props
+                .and_then(|n| n.attribute("MaxDownloadSize"))
+                .and_then(|s| s.parse::<i64>().ok());
+            let min_download_size = ext_props
+                .and_then(|n| n.attribute("MinDownloadSize"))
+                .and_then(|s| s.parse::<i64>().ok());
+            let package_content_id = ext_props
+                .and_then(|n| n.attribute("PackageContentId"))
+                .map(String::from);
+            let package_identity_name = ext_props
+                .and_then(|n| n.attribute("PackageIdentityName"))
+                .map(String::from);
+            let creation_date = ext_props
+                .and_then(|n| n.attribute("CreationDate"))
+                .map(String::from);
+            let content_type = ext_props
+                .and_then(|n| n.attribute("ContentType"))
+                .map(String::from);
+            let mandatory_version = ext_props
+                .and_then(|n| n.attribute("MandatoryVersion"))
+                .map(String::from);
+            let mandatory_date = ext_props
+                .and_then(|n| n.attribute("MandatoryDate"))
+                .map(String::from);
+            let default_properties_language = ext_props
+                .and_then(|n| n.attribute("DefaultPropertiesLanguage"))
+                .map(String::from);
+            let from_store_service = ext_props
+                .and_then(|n| n.attribute("FromStoreService"))
+                .and_then(|v| v.parse::<bool>().ok());
+            let legacy_mobile_product_id = ext_props
+                .and_then(|n| n.attribute("LegacyMobileProductId"))
+                .map(String::from);
+
+            let main_package = update_xml
+                .and_then(|xml_node| {
+                    xml_node
+                        .descendants()
+                        .find(|c| c.tag_name().name() == "AppxPackageInstallData")
+                })
+                .and_then(|n| n.attribute("MainPackage"))
+                .and_then(|v| v.parse::<bool>().ok());
+
+            // file_size: prefer <File Size>, fall back to
+            // <ExtendedProperties MaxDownloadSize>. (DCat is the final
+            // fallback, applied by display_catalog.)
+            let file_size = file_size_attr.or(max_download_size);
+
+            let readable_file_name = PackageInstance::build_readable_file_name(&moniker, file_name);
 
             instances.push(PackageInstance {
                 package_moniker: moniker,
@@ -238,9 +351,37 @@ impl FE3Handler {
                 package_type: pkg_type,
                 applicability_blob: blob,
                 update_id: String::new(),
-                file_size: None,
-                file_name,
+                file_size,
+                file_name: file_name.map(String::from),
                 readable_file_name,
+
+                is_appx_bundle,
+
+                digest,
+                digest_algorithm,
+                modified,
+                patching_type,
+                additional_digests,
+                pieces_hash_digest,
+                block_map_digest,
+
+                handler,
+                is_appx_framework,
+                max_download_size,
+                min_download_size,
+                package_content_id,
+                package_identity_name,
+                creation_date,
+                content_type,
+                mandatory_version,
+                mandatory_date,
+                default_properties_language,
+                from_store_service,
+                legacy_mobile_product_id,
+
+                main_package,
+
+                all_file_locations: Vec::new(),
             });
         }
 
@@ -252,8 +393,12 @@ impl FE3Handler {
     // -----------------------------------------------------------------------
 
     /// For each `(update_id, revision_id)` pair, POST a
-    /// `GetExtendedUpdateInfo2` SOAP request to FE3 and collect the resulting
-    /// file URLs and sizes (blockmap entries – always length 99 – are filtered out).
+    /// `GetExtendedUpdateInfo2` SOAP request to FE3 and collect the
+    /// first non-blockmap URL per response.
+    ///
+    /// This is a thin wrapper over [`Self::get_file_locations`] that picks
+    /// the primary URL and discards the rest. Use `get_file_locations` if
+    /// you need the alternate (signed) URL or per-URL digests.
     pub async fn get_file_urls(
         update_ids: &[String],
         revision_ids: &[String],
@@ -276,10 +421,9 @@ impl FE3Handler {
     /// stream live per-link updates to a UI.
     ///
     /// Callback args: `(request_idx, request_total, update_id, url, size)`.
-    /// `request_idx` is 0-based over `update_ids`; `request_total` equals
-    /// `update_ids.len()`. The callback may fire multiple times per request
-    /// if FE3 returns more than one `<FileLocation>` (rare for store
-    /// packages — almost always 1 per update_id).
+    /// `size` is always `None` — FE3 does not return per-URL sizes in
+    /// `GetExtendedUpdateInfo2` responses (the size lives on `<File Size>`
+    /// in SyncUpdates). Kept in the signature for source compatibility.
     pub async fn get_file_urls_with_progress<F>(
         update_ids: &[String],
         revision_ids: &[String],
@@ -290,14 +434,84 @@ impl FE3Handler {
     where
         F: Fn(usize, usize, &str, &str, Option<i64>),
     {
+        let per_update = Self::get_file_locations_with_progress(
+            update_ids,
+            revision_ids,
+            msa_token,
+            client,
+            |idx, total, update_id, loc| {
+                on_url(idx, total, update_id, &loc.url, None);
+            },
+        )
+        .await?;
+
+        // Match the legacy single-URL-per-update contract: pick the first
+        // location for each update_id (the primary binary; blockmaps are
+        // filtered upstream by digest matching).
+        Ok(per_update
+            .into_iter()
+            .map(|locs| {
+                locs.into_iter()
+                    .next()
+                    .map(|l| (l.url, None))
+                    .unwrap_or_default()
+            })
+            .filter(|(u, _)| !u.is_empty())
+            .collect())
+    }
+
+    /// Rich variant of [`Self::get_file_urls`] that returns *every*
+    /// `<FileLocation>` for each update — primary binary, blockmap, and
+    /// signed alternative — along with the per-URL `<FileDigest>` so
+    /// callers can match a URL back to its `<File>` entry.
+    ///
+    /// Returns a `Vec` indexed parallel to `update_ids`: each inner `Vec`
+    /// is the file locations FE3 returned for that update, in document
+    /// order. Blockmaps are NOT filtered here — that's a job for the
+    /// caller (match `digest` against `PackageInstance::digest` to pick
+    /// the binary, or against `PackageInstance::block_map_digest` to pick
+    /// the blockmap).
+    pub async fn get_file_locations(
+        update_ids: &[String],
+        revision_ids: &[String],
+        msa_token: Option<&str>,
+        client: &reqwest::Client,
+    ) -> Result<Vec<Vec<ResolvedFileLocation>>, StoreError> {
+        Self::get_file_locations_with_progress(
+            update_ids,
+            revision_ids,
+            msa_token,
+            client,
+            |_, _, _, _| {},
+        )
+        .await
+    }
+
+    /// Same as [`Self::get_file_locations`] but fires `on_loc` once per
+    /// resolved `<FileLocation>` as soon as the SOAP response is parsed.
+    ///
+    /// Callback args: `(request_idx, request_total, update_id, &location)`.
+    pub async fn get_file_locations_with_progress<F>(
+        update_ids: &[String],
+        revision_ids: &[String],
+        msa_token: Option<&str>,
+        client: &reqwest::Client,
+        on_loc: F,
+    ) -> Result<Vec<Vec<ResolvedFileLocation>>, StoreError>
+    where
+        F: Fn(usize, usize, &str, &ResolvedFileLocation),
+    {
         let token = msa_token.unwrap_or(MSA_TOKEN);
         let total = update_ids.len();
-        let mut results = Vec::new();
+        let mut all_per_update: Vec<Vec<ResolvedFileLocation>> = Vec::with_capacity(total);
 
         for (i, update_id) in update_ids.iter().enumerate() {
             let revision_id = match revision_ids.get(i) {
                 Some(r) => r.as_str(),
-                None => continue,
+                None => {
+                    all_per_update.push(Vec::new());
+                    continue;
+                }
             };
 
             let body = FE3_FILE_URL_XML
@@ -325,39 +539,41 @@ impl FE3Handler {
                 Err(e) => return Err(StoreError::Xml(e.to_string())),
             };
 
+            let mut locs_for_update: Vec<ResolvedFileLocation> = Vec::new();
             for file_loc in doc.descendants() {
                 if file_loc.tag_name().name() != "FileLocation" {
                     continue;
                 }
                 let mut url_opt: Option<String> = None;
-                let mut size_opt: Option<i64> = None;
+                let mut digest_opt: Option<String> = None;
                 for child in file_loc.children() {
                     match child.tag_name().name() {
                         "Url" => {
                             if let Some(text) = child.text() {
-                                if text.len() != 99 {
-                                    debug!("FE3: URL resolved: {text}");
-                                    url_opt = Some(text.to_owned());
-                                } else {
-                                    trace!("FE3: skipping blockmap URL (len=99)");
-                                }
+                                debug!("FE3: URL resolved: {text}");
+                                url_opt = Some(text.to_owned());
                             }
                         }
-                        "FileSize" => {
-                            size_opt = child.text().and_then(|t| t.parse::<i64>().ok());
-                            debug!("FE3: FileSize={size_opt:?}");
+                        "FileDigest" => {
+                            digest_opt = child.text().map(|t| t.trim().to_owned());
+                            trace!("FE3: FileDigest={digest_opt:?}");
                         }
                         _ => {}
                     }
                 }
                 if let Some(url) = url_opt {
-                    on_url(i, total, update_id, &url, size_opt);
-                    results.push((url, size_opt));
+                    let loc = ResolvedFileLocation {
+                        url,
+                        digest: digest_opt,
+                    };
+                    on_loc(i, total, update_id, &loc);
+                    locs_for_update.push(loc);
                 }
             }
+            all_per_update.push(locs_for_update);
         }
 
-        Ok(results)
+        Ok(all_per_update)
     }
 }
 

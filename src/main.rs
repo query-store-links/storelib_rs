@@ -514,13 +514,10 @@ mod cli {
         fn pkg(moniker: &str, file_name: Option<&str>) -> PackageInstance {
             PackageInstance {
                 package_moniker: moniker.into(),
-                package_uri: None,
                 package_type: PackageType::AppX,
-                applicability_blob: None,
-                update_id: String::new(),
-                file_size: None,
                 file_name: file_name.map(str::to_owned),
                 readable_file_name: PackageInstance::build_readable_file_name(moniker, file_name),
+                ..Default::default()
             }
         }
 

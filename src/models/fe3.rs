@@ -1,33 +1,54 @@
 use crate::models::enums::PackageType;
 use serde::{Deserialize, Serialize};
 
+/// A named hash returned by FE3 (`AdditionalDigest`, `PiecesHashDigest`,
+/// `BlockMapDigest`). `algorithm` is the wire string (e.g. `"SHA256"`).
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DigestEntry {
+    pub algorithm: String,
+    pub value: String,
+}
+
+/// One `<FileLocation>` from a `GetExtendedUpdateInfo2` response.
+///
+/// FE3 typically returns several `FileLocation`s per update — the binary's
+/// download URL plus the blockmap's, and on some responses both an
+/// unsigned CDN edge URL and a signed `tlu.dl.delivery.mp.microsoft.com`
+/// URL with auth query params. `digest` ties the location back to a
+/// specific `<File>` entry (the matching `Digest` attribute) so callers
+/// can distinguish "the binary" from "the blockmap" without URL heuristics.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedFileLocation {
+    pub url: String,
+    /// Per-URL hash from `<FileDigest>` — base64-encoded, matches the
+    /// `Digest` attribute on the `<File>` this URL serves.
+    pub digest: Option<String>,
+}
+
 /// A resolved package instance with download URI and update metadata.
 ///
-/// Serializes as camelCase, so JS consumers see:
-/// ```text
-/// {
-///   packageMoniker: string,
-///   packageUri: string | null,
-///   packageType: "uap" | "xap" | "appX" | "unknown",
-///   applicabilityBlob: object | null,
-///   updateId: string,
-///   packageSize: number | null,
-///   fileName: string | null,         // FE3 <File FileName=...> (guid.ext)
-///   readableFileName: string,        // moniker + real extension
-/// }
-/// ```
-#[derive(Debug, Clone, serde::Serialize)]
+/// Almost every field beyond the first eight is sourced from the FE3
+/// `SyncUpdates` response — see the parser in `services::fe3` for the
+/// exact XML path. Fields are `Option`/`Vec` so absence is just `None`/
+/// empty; nothing here will panic at construction time.
+#[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PackageInstance {
     pub package_moniker: String,
+    /// Primary download URL (the first non-blockmap URL returned by FE3).
+    /// See [`Self::all_file_locations`] for *all* URLs FE3 returned,
+    /// including blockmaps and signed/secured alternatives.
     pub package_uri: Option<String>,
     pub package_type: PackageType,
     pub applicability_blob: Option<ApplicabilityBlob>,
     pub update_id: String,
-    /// Download size in bytes. Prefer the FE3-reported size; fall back to
-    /// DisplayCatalog's `MaxDownloadSizeInBytes`. `None` for framework
-    /// packages (e.g. VCLibs) that aren't listed in the catalog SKU but
-    /// are still returned by FE3.
+    /// Download size in bytes. Sourced from `<File Size="">` (SyncUpdates)
+    /// for the primary binary, falling back to `<ExtendedProperties
+    /// MaxDownloadSize="">`, then to DisplayCatalog's
+    /// `MaxDownloadSizeInBytes`. `None` only when none of the three carry
+    /// a value.
     #[serde(rename = "packageSize")]
     pub file_size: Option<i64>,
     /// FE3's raw `<File FileName="...">` value — typically a GUID followed
@@ -45,6 +66,73 @@ pub struct PackageInstance {
     /// This is *not* sanitised for any particular filesystem — callers that
     /// write to disk should sanitise per-OS (`:` `*` `?` etc. on Windows).
     pub readable_file_name: String,
+
+    // ---------------------------------------------------------------
+    // <AppxMetadata IsAppxBundle="...">
+    // ---------------------------------------------------------------
+    /// `true` if the primary file is a bundle (`.appxbundle` / `.msixbundle`).
+    pub is_appx_bundle: Option<bool>,
+
+    // ---------------------------------------------------------------
+    // <File> attributes (primary binary — the one whose
+    //   InstallerSpecificIdentifier matches the moniker)
+    // ---------------------------------------------------------------
+    /// Per-binary hash — base64-encoded. Algorithm in
+    /// [`Self::digest_algorithm`] (`"SHA1"` for every package observed so
+    /// far). Use this to verify the download after fetching.
+    pub digest: Option<String>,
+    pub digest_algorithm: Option<String>,
+    /// Last-modified timestamp from `<File Modified="">`, ISO 8601.
+    pub modified: Option<String>,
+    /// Present on companion files (blockmaps/CABs); absent on the primary
+    /// binary. e.g. `"DynamicMetadata"`.
+    pub patching_type: Option<String>,
+    /// Extra `<AdditionalDigest Algorithm="...">value</AdditionalDigest>`
+    /// children of the `<File>` element.
+    pub additional_digests: Vec<DigestEntry>,
+    /// `<PiecesHashDigest>` — used for delta/range downloads.
+    pub pieces_hash_digest: Option<DigestEntry>,
+    /// `<BlockMapDigest>` — hash of the package's `.appxblockmap.xml`.
+    pub block_map_digest: Option<DigestEntry>,
+
+    // ---------------------------------------------------------------
+    // <ExtendedProperties> attributes (the rich variant — only some
+    // updates carry these; lightweight packages have them all `None`)
+    // ---------------------------------------------------------------
+    /// Update handler URI, e.g.
+    /// `"http://schemas.microsoft.com/msus/2002/12/UpdateHandlers/AppxPackage"`.
+    pub handler: Option<String>,
+    /// Authoritative framework flag from `<ExtendedProperties
+    /// IsAppxFramework="">`. Prefer this over moniker-prefix heuristics.
+    pub is_appx_framework: Option<bool>,
+    pub max_download_size: Option<i64>,
+    pub min_download_size: Option<i64>,
+    /// Store-side content identifier for this specific package.
+    pub package_content_id: Option<String>,
+    /// PFN base, e.g. `"4DF9E0F8.NETFLIX"`.
+    pub package_identity_name: Option<String>,
+    pub creation_date: Option<String>,
+    pub content_type: Option<String>,
+    pub mandatory_version: Option<String>,
+    pub mandatory_date: Option<String>,
+    pub default_properties_language: Option<String>,
+    pub from_store_service: Option<bool>,
+    pub legacy_mobile_product_id: Option<String>,
+
+    // ---------------------------------------------------------------
+    // <AppxPackageInstallData>
+    // ---------------------------------------------------------------
+    /// `true` for the primary package in a bundle; `false` for satellites
+    /// (resource/language/scale split packages).
+    pub main_package: Option<bool>,
+
+    // ---------------------------------------------------------------
+    // <FileLocation> entries (GetExtendedUpdateInfo2)
+    // ---------------------------------------------------------------
+    /// Every URL FE3 returned for this update, including blockmap URLs
+    /// and signed alternatives. Useful when the primary URL is rate-limited
+    /// and a fallback is needed. Empty until URLs have been resolved.
+    pub all_file_locations: Vec<ResolvedFileLocation>,
 }
 
 impl PackageInstance {
@@ -130,11 +218,11 @@ mod tests {
             package_moniker: moniker.into(),
             package_uri: Some("https://download.example/pkg.appx".into()),
             package_type: PackageType::AppX,
-            applicability_blob: None,
             update_id: "11111111-2222-3333-4444-555555555555".into(),
             file_size: Some(12345),
             file_name: Some(file_name.into()),
             readable_file_name: PackageInstance::build_readable_file_name(moniker, Some(file_name)),
+            ..Default::default()
         }
     }
 

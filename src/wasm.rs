@@ -289,16 +289,48 @@ export interface ApplicabilityBlob {
     "content.type"?: number | null;
 }
 
-/** A resolved package instance returned by `getPackagesForProduct`. */
+/** A named hash returned by FE3 (`AdditionalDigest`, `PiecesHashDigest`,
+ *  `BlockMapDigest`). `algorithm` is the wire string (typically
+ *  `"SHA1"` or `"SHA256"`); `value` is base64-encoded. */
+export interface DigestEntry {
+    algorithm: string;
+    value: string;
+}
+
+/** One `<FileLocation>` from a `GetExtendedUpdateInfo2` response.
+ *  FE3 often returns several per update (binary + blockmap, plus an
+ *  optional signed `tlu.dl.delivery.mp.microsoft.com` URL). Match
+ *  `digest` against `PackageInstance.digest` /
+ *  `PackageInstance.blockMapDigest.value` to identify each. */
+export interface ResolvedFileLocation {
+    url: string;
+    /** Per-URL hash from `<FileDigest>` — base64-encoded SHA1 typically.
+     *  Matches the `Digest` attribute on the owning `<File>`. */
+    digest: string | null;
+}
+
+/** A resolved package instance returned by `getPackagesForProduct`.
+ *
+ *  Almost every optional field below comes from the FE3 SyncUpdates
+ *  response — `<File>` attributes for the per-binary fields,
+ *  `<ExtendedProperties>` for the rich package metadata, and
+ *  `<AppxPackageInstallData>` for `mainPackage`. Fields are `null` when
+ *  the source XML didn't carry the corresponding attribute. */
 export interface PackageInstance {
     packageMoniker: string;
+    /** Primary download URL — the FE3 `<FileLocation>` whose
+     *  `<FileDigest>` matches the binary's `<File Digest>`. Falls back
+     *  to the first location if no digest match is possible.  See
+     *  `allFileLocations` for the complete URL list (alternate URLs,
+     *  blockmap URLs, etc.). */
     packageUri: string | null;
     packageType: PackageTypeStr;
     applicabilityBlob: ApplicabilityBlob | null;
     updateId: string;
-    /** Download size in bytes. FE3-reported first, falling back to the
-     *  DisplayCatalog `MaxDownloadSizeInBytes` field. `null` only for
-     *  framework packages that DCat doesn't list a size for.
+    /** Download size in bytes. Sourced from `<File Size>` (SyncUpdates)
+     *  for the primary binary, falling back to
+     *  `<ExtendedProperties MaxDownloadSize>`, then to DisplayCatalog's
+     *  `MaxDownloadSizeInBytes`.
      *
      *  Note: i64 on the wire. Renders as `bigint` since 0.1.7-fix-1 so values
      *  above `Number.MAX_SAFE_INTEGER` survive the crossing. Cast with
@@ -315,6 +347,63 @@ export interface PackageInstance {
      *  report a recognised one. Not sanitised for filesystem reserved
      *  characters — sanitise per-OS before saving. */
     readableFileName: string;
+
+    // ----- From <AppxMetadata> --------------------------------------
+    /** True if the primary file is a bundle (`.appxbundle` / `.msixbundle`). */
+    isAppxBundle: boolean | null;
+
+    // ----- From <File> attributes (primary binary) ------------------
+    /** Per-binary hash, base64-encoded. Algorithm is in `digestAlgorithm`
+     *  (always `"SHA1"` in current FE3 responses). Use to verify the
+     *  downloaded bytes. */
+    digest: string | null;
+    digestAlgorithm: string | null;
+    /** Last-modified timestamp, ISO 8601. */
+    modified: string | null;
+    /** Present on companion files (blockmaps / CABs); `null` on the
+     *  primary binary. */
+    patchingType: string | null;
+    /** Extra `<AdditionalDigest>` entries — often a SHA256 alongside
+     *  the primary SHA1. */
+    additionalDigests: DigestEntry[];
+    /** `<PiecesHashDigest>` — used for delta / range downloads. */
+    piecesHashDigest: DigestEntry | null;
+    /** `<BlockMapDigest>` — hash of the package's blockmap. */
+    blockMapDigest: DigestEntry | null;
+
+    // ----- From <ExtendedProperties> --------------------------------
+    /** Update handler URI, e.g.
+     *  `"http://schemas.microsoft.com/msus/2002/12/UpdateHandlers/AppxPackage"`. */
+    handler: string | null;
+    /** Authoritative framework flag. Prefer this over moniker-prefix
+     *  heuristics. */
+    isAppxFramework: boolean | null;
+    /** Alternate size sources from FE3 ExtendedProperties. `packageSize`
+     *  is the unified one to read; these are exposed for completeness. */
+    maxDownloadSize: number | bigint | null;
+    minDownloadSize: number | bigint | null;
+    /** Store-side content identifier for this specific package. */
+    packageContentId: string | null;
+    /** PFN base, e.g. `"4DF9E0F8.NETFLIX"`. */
+    packageIdentityName: string | null;
+    creationDate: string | null;
+    contentType: string | null;
+    mandatoryVersion: string | null;
+    mandatoryDate: string | null;
+    defaultPropertiesLanguage: string | null;
+    fromStoreService: boolean | null;
+    legacyMobileProductId: string | null;
+
+    // ----- From <AppxPackageInstallData> ---------------------------
+    /** True for the primary package in a bundle, false for satellites
+     *  (resource / language / scale split packages). */
+    mainPackage: boolean | null;
+
+    // ----- From <FileLocation> (GetExtendedUpdateInfo2) -------------
+    /** Every `<FileLocation>` FE3 returned for this update — binary URL,
+     *  blockmap URL, and (when present) the signed CDN alternative.
+     *  Empty until URLs have been resolved. */
+    allFileLocations: ResolvedFileLocation[];
 }
 
 /** Stage identifier passed to `onProgress`. Stable across releases.
