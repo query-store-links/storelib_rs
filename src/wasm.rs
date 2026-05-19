@@ -17,7 +17,7 @@ use crate::cancellation::CancellationToken;
 use crate::error::StoreError;
 use crate::models::enums::{DCatEndpoint, DeviceFamily, IdentifierType};
 use crate::models::locale::{Lang, LanguageTag, Locale, Market};
-use crate::services::display_catalog::{DisplayCatalogHandler, ProgressEvent};
+use crate::services::display_catalog::{DisplayCatalogHandler, ProgressCallback, ProgressEvent};
 use crate::services::fe3::FE3Handler;
 use crate::utilities::helpers as h;
 
@@ -757,6 +757,7 @@ impl DisplayCatalogHandlerJs {
 #[wasm_bindgen(js_name = Fe3Handler)]
 pub struct Fe3HandlerJs {
     client: reqwest::Client,
+    progress: Option<ProgressCallback>,
 }
 
 #[wasm_bindgen(js_class = Fe3Handler)]
@@ -768,7 +769,35 @@ impl Fe3HandlerJs {
                 .user_agent("StoreLib")
                 .build()
                 .unwrap_or_default(),
+            progress: None,
         }
+    }
+
+    /// Install a progress callback fired during `getFileUrls`. Pass `null`
+    /// to detach. The callback receives a `{stage, message, current, total}`
+    /// object.
+    ///
+    /// Stages currently emitted:
+    /// - `fe3.linkReceived` *(per URL; `message` =
+    ///   `"uri=<url> | size=<bytes-or-?> | updateId=<id>"`)*
+    #[wasm_bindgen(js_name = onProgress)]
+    pub fn on_progress(
+        &mut self,
+        #[wasm_bindgen(unchecked_param_type = "OnProgress | null")] callback: JsValue,
+    ) {
+        if callback.is_null() || callback.is_undefined() {
+            self.progress = None;
+            return;
+        }
+        let Ok(func): Result<Function, _> = callback.dyn_into() else {
+            self.progress = None;
+            return;
+        };
+        let cb = move |event: ProgressEvent| {
+            let val = to_js(&event).unwrap_or(JsValue::NULL);
+            let _ = func.call1(&JsValue::NULL, &val);
+        };
+        self.progress = Some(Box::new(cb));
     }
 
     /// POST `GetCookie` and return the `EncryptedData` value from the response.
@@ -821,6 +850,11 @@ impl Fe3HandlerJs {
 
     /// Resolve direct download URLs for the given update + revision IDs.
     /// Returns `Array<{url: string, size: number | null}>`.
+    ///
+    /// Subscribe via [`Self::on_progress`] to stream `fe3.linkReceived`
+    /// events live as each `GetExtendedUpdateInfo2` response is parsed,
+    /// before the next request goes out — mirrors the per-link emit done
+    /// from `DisplayCatalogHandler::get_packages_for_product`.
     #[wasm_bindgen(js_name = getFileUrls)]
     pub async fn get_file_urls(
         &self,
@@ -830,11 +864,27 @@ impl Fe3HandlerJs {
     ) -> Result<JsValue, JsValue> {
         let update_ids: Vec<String> = from_value(update_ids).map_err(js_err)?;
         let revision_ids: Vec<String> = from_value(revision_ids).map_err(js_err)?;
-        let pairs = FE3Handler::get_file_urls(
+
+        let progress = self.progress.as_ref();
+        let pairs = FE3Handler::get_file_urls_with_progress(
             &update_ids,
             &revision_ids,
             msa_token.as_deref(),
             &self.client,
+            |idx, total, update_id, url, size| {
+                let Some(cb) = progress else {
+                    return;
+                };
+                cb(ProgressEvent {
+                    stage: "fe3.linkReceived",
+                    message: format!(
+                        "uri={url} | size={} | updateId={update_id}",
+                        size.map(|s| s.to_string()).unwrap_or_else(|| "?".into()),
+                    ),
+                    current: Some((idx + 1) as u32),
+                    total: Some(total as u32),
+                });
+            },
         )
         .await
         .map_err(store_err)?;
