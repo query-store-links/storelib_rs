@@ -36,10 +36,11 @@ pub use error::StoreError;
 pub use models::addon::Addon;
 pub use models::catalog::{
     AllowedPlatform, AlternateId, Application, Availability, AvailabilityProperties,
-    ClientConditions, Conditions, ContentRating, DisplayCatalogModel, DisplaySkuAvailability,
-    FulfillmentData, HardwareProperties, Image, LegalText, OrderManagementData, Package,
-    PackageDownloadUri, PiFilter, PlatformDependency, Price, Product, ProductLocalizedProperty,
-    ProductMarketProperty, ProductProperties, SearchTitle, Sku, SkuLocalizedProperty,
+    ClientConditions, CmsVideo, Conditions, ContentRating, DisplayCatalogModel,
+    DisplaySkuAvailability, FrameworkDependency, FulfillmentData, HardwareProperties, Image,
+    LegalText, LicensingData, OrderManagementData, Package, PackageDownloadUri, PiFilter,
+    PlatformDependency, Price, Product, ProductLocalizedProperty, ProductMarketProperty,
+    ProductProperties, SatisfyingEntitlementKey, SearchTitle, Sku, SkuLocalizedProperty,
     SkuMarketProperty, SkuProperties, UsageDatum, ValidationData,
 };
 pub use models::enums::{

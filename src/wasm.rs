@@ -236,6 +236,13 @@ export interface LocaleJson {
     market: MarketCode;
     language: LanguageCode;
     includeNeutral: boolean;
+    /** When true, requests carry `languages=<lang>-<market>` (e.g.
+     *  `en-US`) instead of the bare `<lang>` (e.g. `en`). Microsoft
+     *  returns more fields for the full-tag form — most notably
+     *  `LocalizedProperties[].cmsVideos[]` is empty for `languages=en`
+     *  but populated for `languages=en-US`. Defaults to `true` on
+     *  `Locale.production()`, `false` on `new Locale(...)`. */
+    useFullTag?: boolean;
 }
 
 /** Identifier type accepted by `queryDcat`. `parseIdentifierType` will
@@ -484,9 +491,47 @@ export interface DisplayCatalogModel {
 export interface ProductLike {
     lastModifiedDate?: string | null;
     localizedProperties?: ProductLocalizedPropertyLike[] | null;
-    properties?: { [k: string]: any } | null;
-    displaySkuAvailabilities?: { [k: string]: any }[] | null;
+    properties?: ProductPropertiesLike | null;
+    displaySkuAvailabilities?: DisplaySkuAvailabilityLike[] | null;
     productKind?: ProductKindStr | string | null;
+    /** Compliance / content-policy escape hatch. Usually `{}`. */
+    productPolicies?: { [k: string]: any } | null;
+    [key: string]: any;
+}
+
+/** Subset of `Product.Properties` with the well-known typed fields
+ *  surfaced explicitly. Unknown fields flow through the index
+ *  signature. */
+export interface ProductPropertiesLike {
+    canInstallToSDCard?: boolean | null;
+    packageFamilyName?: string | null;
+    packageIdentityName?: string | null;
+    publisherId?: string | null;
+    publisherCertificateName?: string | null;
+    pdpBackgroundColor?: string | null;
+    revisionId?: string | null;
+    hasAddOns?: boolean | null;
+    /** Xbox flags. `xbox` is usually `{}` on non-Xbox products. */
+    xbox?: { [k: string]: any } | null;
+    xboxLiveGoldRequired?: boolean | null;
+    xboxConsoleGenCompatible?: any | null;
+    xboxConsoleGenOptimized?: any | null;
+    xboxCrossGenSetId?: any | null;
+    xboxXPA?: boolean | null;
+    xboxLiveTier?: any | null;
+    /** Opaque escape hatch (string-encoded JSON in `StoreApp`). */
+    extendedClientMetadata?: { [k: string]: any } | null;
+    [key: string]: any;
+}
+
+/** Subset of `DisplaySkuAvailability`. The full `Availability` /
+ *  `HistoricalBestAvailability` shape is documented on `Availability`. */
+export interface DisplaySkuAvailabilityLike {
+    sku?: { [k: string]: any } | null;
+    availabilities?: Availability[] | null;
+    /** Prior price/availability snapshots — same shape as
+     *  `availabilities` plus `productASchema`. */
+    historicalBestAvailabilities?: Availability[] | null;
     [key: string]: any;
 }
 
@@ -495,7 +540,14 @@ export interface ProductLocalizedPropertyLike {
     productDescription?: string | null;
     publisherName?: string | null;
     language?: string | null;
-    images?: { [k: string]: any }[] | null;
+    images?: Image[] | null;
+    /** CMS-managed promo videos (separate from `videos`). */
+    cmsVideos?: CmsVideo[] | null;
+    friendlyTitle?: string | null;
+    supportPhone?: string | null;
+    publisherAddress?: string | null;
+    interactive3DEnabled?: boolean | null;
+    interactiveModelConfig?: any | null;
     [key: string]: any;
 }
 
@@ -521,17 +573,37 @@ export interface Price {
     wholesaleCurrencyCode?: string | null;
 }
 
-/** Availability slice returned by `handler.availabilities`. Loosely typed
- *  because the full Availability schema is large. */
+/** Availability slice. Reused for both the live `availabilities[]`
+ *  array on a SKU and the parallel `historicalBestAvailabilities[]`
+ *  array (which adds `productASchema` and lacks `remediationRequired`). */
 export interface Availability {
     actions?: string[] | null;
     availabilityId?: string | null;
-    conditions?: { [k: string]: any } | null;
+    availabilityASchema?: string | null;
+    availabilityBSchema?: string | null;
+    /** Schema version string — present only on entries inside
+     *  `historicalBestAvailabilities`. */
+    productASchema?: string | null;
+    conditions?: {
+        clientConditions?: { allowedPlatforms?: any[] | null } | null;
+        endDate?: string | null;
+        startDate?: string | null;
+        resourceSetIds?: string[] | null;
+        /** Geographic / regulatory gates, e.g.
+         *  `["CannotSeenByChinaClient"]`. */
+        eligibilityPredicateIds?: string[] | null;
+        /** DCat schema version this availability targets. */
+        supportedCatalogVersion?: number | null;
+        [k: string]: any;
+    } | null;
     markets?: string[] | null;
     orderManagementData?: { price?: Price | null; [k: string]: any } | null;
     properties?: { [k: string]: any } | null;
     skuId?: string | null;
     displayRank?: number | null;
+    remediationRequired?: boolean | null;
+    /** Subscription / entitlement-key data. Non-null for paid content. */
+    licensingData?: LicensingData | null;
     [key: string]: any;
 }
 
@@ -554,10 +626,13 @@ export interface Package {
     isStreamingApp?: boolean | null;
     capabilities?: string[] | null;
     contentId?: string | null;
+    /** Runtime/library packages this binary depends on. */
+    frameworkDependencies?: FrameworkDependency[] | null;
     [key: string]: any;
 }
 
-/** Image asset returned by `handler.imagesWithPurpose`. */
+/** Image asset returned by `handler.imagesWithPurpose` and reused inside
+ *  `CmsVideo.previewImage`. */
 export interface Image {
     backgroundColor?: string | null;
     caption?: string | null;
@@ -566,9 +641,60 @@ export interface Image {
     height?: number | null;
     imagePositionInfo?: string | null;
     imagePurpose?: string | null;
-    unscaledImageSha256Hash?: string | null;
+    /** Base64-encoded SHA256 of the unscaled source image. Note the
+     *  ALL-CAPS `SHA256` in the key — that's the actual wire form. */
+    unscaledImageSHA256Hash?: string | null;
     uri?: string | null;
     width?: number | null;
+    /** EIS (Enterprise/Internal Store) listing identifier. */
+    eisListingIdentifier?: string | null;
+    /** Microsoft asset/CDN file id (numeric string). */
+    fileId?: string | null;
+}
+
+/** CMS-managed promo video attached to a product (typically the "hero
+ *  trailer" on the Store listing). Distinct from the generic `Videos`
+ *  array on `ProductLocalizedProperty`. */
+export interface CmsVideo {
+    audioEncoding?: string | null;
+    cc?: any | null;
+    cms?: any | null;
+    caption?: string | null;
+    /** MPEG-DASH manifest URL. */
+    dash?: string | null;
+    /** HLS manifest URL. */
+    hls?: string | null;
+    fileSizeInBytes?: number | null;
+    height?: number | null;
+    width?: number | null;
+    previewImage?: Image | null;
+    sortOrder?: number | null;
+    trailerId?: any | null;
+    videoEncoding?: string | null;
+    videoPositionInfo?: string | null;
+    /** e.g. `"HeroTrailer"`, `"Trailer"`. */
+    videoPurpose?: string | null;
+}
+
+/** One entry in `Package.frameworkDependencies` — a runtime/library the
+ *  primary binary depends on. */
+export interface FrameworkDependency {
+    maxTested?: any | null;
+    minVersion?: any | null;
+    /** PFN base of the dependency, e.g.
+     *  `"Microsoft.VCLibs.140.00.UWPDesktop"`. */
+    packageIdentity?: string | null;
+}
+
+/** Subscription / entitlement-key data on an `Availability`. Non-null
+ *  for paid content; null for free apps. */
+export interface LicensingData {
+    satisfyingEntitlementKeys?: SatisfyingEntitlementKey[] | null;
+}
+
+export interface SatisfyingEntitlementKey {
+    entitlementKeys?: string[] | null;
+    licensingKeyIds?: string[] | null;
 }
 "#;
 
@@ -735,12 +861,33 @@ impl LocaleJs {
         })
     }
 
-    /// Default production locale: `US / en-US`, neutral included.
+    /// Default production locale: `US / en`, neutral disabled, full-tag
+    /// emission enabled so DCat requests carry `languages=en-US` and
+    /// pick up CMS video metadata (which is empty for the bare `en`
+    /// language form).
     #[wasm_bindgen(js_name = production)]
     pub fn production() -> LocaleJs {
         LocaleJs {
             inner: Locale::production(),
         }
+    }
+
+    /// Toggle [`useFullTag`] fluently — returns a new `Locale` rather
+    /// than mutating in place (the underlying Rust struct is `Clone`).
+    /// Pass `true` to send BCP-47 tags (`en-US`); `false` for the bare
+    /// ISO 639-1 code (`en`).
+    #[wasm_bindgen(js_name = withFullTag)]
+    pub fn with_full_tag(&self, enabled: bool) -> LocaleJs {
+        LocaleJs {
+            inner: self.inner.clone().with_full_tag(enabled),
+        }
+    }
+
+    /// Returns whether DCat requests will carry `languages=<lang>-<market>`
+    /// (true) or just `languages=<lang>` (false).
+    #[wasm_bindgen(getter, js_name = useFullTag)]
+    pub fn use_full_tag(&self) -> bool {
+        self.inner.use_full_tag
     }
 
     /// Build a `Locale` from a Microsoft Store BCP-47 tag (e.g. `"en-US"`,

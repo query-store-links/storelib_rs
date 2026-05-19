@@ -79,6 +79,9 @@ pub struct Product {
     pub schema_version: Option<String>,
     pub product_kind: Option<String>,
     pub display_sku_availabilities: Option<Vec<DisplaySkuAvailability>>,
+    /// Compliance / content-policy escape hatch. Usually `{}`; schema not
+    /// documented by Microsoft, so kept as `Value`.
+    pub product_policies: Option<serde_json::Value>,
 }
 
 // ---------------------------------------------------------------------------
@@ -114,6 +117,20 @@ pub struct ProductProperties {
     pub xbox_live_tier: Option<serde_json::Value>,
     #[serde(rename(serialize = "xboxXPA", deserialize = "XboxXPA"))]
     pub xbox_xpa: Option<serde_json::Value>,
+    /// Misc Xbox flags. The wire surface uses ALL-CAPS for the key, so
+    /// the rename is explicit. Object shape varies and is usually empty
+    /// (`{}`) for non-Xbox products — kept as `Value` for forward-compat.
+    #[serde(rename(serialize = "xbox", deserialize = "XBOX"))]
+    pub xbox: Option<serde_json::Value>,
+    pub xbox_console_gen_compatible: Option<serde_json::Value>,
+    pub xbox_console_gen_optimized: Option<serde_json::Value>,
+    pub xbox_cross_gen_set_id: Option<serde_json::Value>,
+    pub xbox_live_gold_required: Option<bool>,
+    /// Escape hatch carrying additional client metadata. Most useful field
+    /// in practice is `StoreApp` (a string-encoded JSON object with a
+    /// `productDeclarations.usesGenerativeAI` flag and secondary
+    /// categories). Kept as `Value` because the inner JSON is opaque.
+    pub extended_client_metadata: Option<serde_json::Value>,
     pub ownership_type: Option<serde_json::Value>,
     pub pdp_background_color: Option<String>,
     pub has_add_ons: Option<bool>,
@@ -170,12 +187,20 @@ pub struct ProductLocalizedProperty {
     pub publisher_name: Option<String>,
     pub publisher_website_uri: Option<String>,
     pub support_uri: Option<String>,
+    pub support_phone: Option<String>,
+    pub publisher_address: Option<String>,
     pub eligibility_properties: Option<serde_json::Value>,
     pub franchises: Option<Vec<serde_json::Value>>,
     pub images: Option<Vec<Image>>,
     pub videos: Option<Vec<serde_json::Value>>,
+    /// CMS-managed promo videos (hero trailers, etc.) — distinct from the
+    /// generic `videos` array. Carries DASH/HLS URLs + a typed
+    /// `PreviewImage`.
+    #[serde(rename(serialize = "cmsVideos", deserialize = "CMSVideos"))]
+    pub cms_videos: Option<Vec<CmsVideo>>,
     pub product_description: Option<String>,
     pub product_title: Option<String>,
+    pub friendly_title: Option<String>,
     pub short_title: Option<String>,
     pub sort_title: Option<String>,
     pub short_description: Option<String>,
@@ -183,8 +208,48 @@ pub struct ProductLocalizedProperty {
     pub voice_title: Option<String>,
     pub render_group_details: Option<serde_json::Value>,
     pub product_display_ranks: Option<Vec<serde_json::Value>>,
+    /// True if the listing has a 3D-interactive model viewer
+    /// (used by some AR-enabled apps).
+    #[serde(rename(
+        serialize = "interactive3DEnabled",
+        deserialize = "Interactive3DEnabled"
+    ))]
+    pub interactive_3d_enabled: Option<bool>,
+    /// Opaque config for the 3D model viewer (Microsoft hasn't published
+    /// a schema). Keep as `Value` for forward-compat.
+    pub interactive_model_config: Option<serde_json::Value>,
     pub language: Option<String>,
     pub markets: Option<Vec<String>>,
+}
+
+/// A CMS-managed promo video attached to a product (typically the
+/// "hero trailer" shown on the Store listing). Most string fields can
+/// be empty strings in the wild.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all(serialize = "camelCase", deserialize = "PascalCase"))]
+pub struct CmsVideo {
+    pub audio_encoding: Option<String>,
+    #[serde(rename(serialize = "cc", deserialize = "CC"))]
+    pub cc: Option<serde_json::Value>,
+    #[serde(rename(serialize = "cms", deserialize = "CMS"))]
+    pub cms: Option<serde_json::Value>,
+    pub caption: Option<String>,
+    /// MPEG-DASH manifest URL.
+    #[serde(rename(serialize = "dash", deserialize = "DASH"))]
+    pub dash: Option<String>,
+    /// HLS manifest URL.
+    #[serde(rename(serialize = "hls", deserialize = "HLS"))]
+    pub hls: Option<String>,
+    pub file_size_in_bytes: Option<i64>,
+    pub height: Option<i64>,
+    pub width: Option<i64>,
+    pub preview_image: Option<Image>,
+    pub sort_order: Option<i64>,
+    pub trailer_id: Option<serde_json::Value>,
+    pub video_encoding: Option<String>,
+    pub video_position_info: Option<String>,
+    /// e.g. `"HeroTrailer"`, `"Trailer"`.
+    pub video_purpose: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -204,9 +269,29 @@ pub struct Image {
     pub height: Option<i64>,
     pub image_position_info: Option<String>,
     pub image_purpose: Option<String>,
+    /// Explicit rename — serde's PascalCase converter renders `SHA256` as
+    /// `Sha256`, which doesn't match the wire (`UnscaledImageSHA256Hash`).
+    #[serde(rename(
+        serialize = "unscaledImageSHA256Hash",
+        deserialize = "UnscaledImageSHA256Hash"
+    ))]
     pub unscaled_image_sha256_hash: Option<String>,
     pub uri: Option<String>,
     pub width: Option<i64>,
+    /// EIS (Enterprise/Internal Store) listing identifier — explicit
+    /// rename to preserve the `EIS` casing across the wire.
+    #[serde(
+        default,
+        rename(
+            serialize = "eisListingIdentifier",
+            deserialize = "EISListingIdentifier"
+        )
+    )]
+    pub eis_listing_identifier: Option<String>,
+    /// Microsoft asset / CDN file id (numeric string), e.g.
+    /// `"3067298299926220602"`.
+    #[serde(default)]
+    pub file_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -225,6 +310,13 @@ pub struct AlternateId {
 pub struct DisplaySkuAvailability {
     pub sku: Option<Sku>,
     pub availabilities: Option<Vec<Availability>>,
+    /// Parallel array to `availabilities` describing prior price /
+    /// availability snapshots (the "historical best" the Store shows for
+    /// crossed-out pricing). Same shape as `Availability` — the
+    /// HBA-only extra field is `product_a_schema`; the
+    /// `Availability`-only extra is `remediation_required`. Both are
+    /// optional, so one struct serves both arrays.
+    pub historical_best_availabilities: Option<Vec<Availability>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -250,6 +342,10 @@ pub struct SkuProperties {
     pub early_adopter_enrollment_url: Option<serde_json::Value>,
     pub fulfillment_data: Option<FulfillmentData>,
     pub fulfillment_type: Option<String>,
+    pub fulfillment_plugin_id: Option<String>,
+    /// Explicit rename — `IAPs` is all-caps on the wire and serde's
+    /// PascalCase converter would emit `IaPs` otherwise.
+    #[serde(rename(serialize = "hasThirdPartyIAPs", deserialize = "HasThirdPartyIAPs"))]
     pub has_third_party_ia_ps: Option<bool>,
     pub last_update_date: Option<String>,
     pub hardware_properties: Option<HardwareProperties>,
@@ -258,6 +354,11 @@ pub struct SkuProperties {
     pub installation_terms: Option<String>,
     pub packages: Option<Vec<Package>>,
     pub version_string: Option<String>,
+    /// Explicit rename — `B2B` is all-caps on the wire.
+    #[serde(rename(
+        serialize = "visibleToB2BServiceIds",
+        deserialize = "VisibleToB2BServiceIds"
+    ))]
     pub visible_to_b2b_service_ids: Option<Vec<serde_json::Value>>,
     #[serde(rename(serialize = "xboxXPA", deserialize = "XboxXPA"))]
     pub xbox_xpa: Option<bool>,
@@ -282,6 +383,8 @@ pub struct FulfillmentData {
     pub package_family_name: Option<String>,
     pub sku_id: Option<String>,
     pub content: Option<serde_json::Value>,
+    /// Per-package feature flags. Often `null`; schema not documented.
+    pub package_features: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -303,7 +406,7 @@ pub struct Package {
     pub capabilities: Option<Vec<String>>,
     pub device_capabilities: Option<Vec<serde_json::Value>>,
     pub experience_ids: Option<Vec<serde_json::Value>>,
-    pub framework_dependencies: Option<Vec<serde_json::Value>>,
+    pub framework_dependencies: Option<Vec<FrameworkDependency>>,
     pub hardware_dependencies: Option<Vec<serde_json::Value>>,
     pub hardware_requirements: Option<Vec<serde_json::Value>>,
     pub hash: Option<String>,
@@ -336,6 +439,19 @@ pub struct Package {
 pub struct PackageDownloadUri {
     pub uri: Option<String>,
     pub rank: Option<i64>,
+}
+
+/// One entry in `Package.framework_dependencies` — a runtime / library
+/// package the primary binary needs. Versions are returned as integers
+/// or strings depending on the endpoint, so we keep them as
+/// [`serde_json::Value`].
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all(serialize = "camelCase", deserialize = "PascalCase"))]
+pub struct FrameworkDependency {
+    pub max_tested: Option<serde_json::Value>,
+    pub min_version: Option<serde_json::Value>,
+    /// PFN base of the dependency, e.g. `"Microsoft.VCLibs.140.00.UWPDesktop"`.
+    pub package_identity: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -418,6 +534,30 @@ pub struct Availability {
     pub sku_id: Option<String>,
     pub display_rank: Option<i64>,
     pub remediation_required: Option<bool>,
+    /// Subscription / entitlement-key data. Present (non-null) for paid
+    /// content; `None` for free apps like Netflix.
+    pub licensing_data: Option<LicensingData>,
+    /// Schema version string — present only on entries inside
+    /// `historical_best_availabilities` (e.g. `"Product;3"`). `None` on
+    /// regular `availabilities`.
+    #[serde(rename(serialize = "productASchema", deserialize = "ProductASchema"))]
+    pub product_a_schema: Option<String>,
+}
+
+/// Subscription / entitlement-key data attached to an [`Availability`].
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all(serialize = "camelCase", deserialize = "PascalCase"))]
+pub struct LicensingData {
+    pub satisfying_entitlement_keys: Option<Vec<SatisfyingEntitlementKey>>,
+}
+
+/// One entry in [`LicensingData::satisfying_entitlement_keys`] — the keys
+/// that satisfy this availability's licensing requirements.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all(serialize = "camelCase", deserialize = "PascalCase"))]
+pub struct SatisfyingEntitlementKey {
+    pub entitlement_keys: Option<Vec<String>>,
+    pub licensing_key_ids: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -462,6 +602,12 @@ pub struct Conditions {
     pub end_date: Option<String>,
     pub resource_set_ids: Option<Vec<String>>,
     pub start_date: Option<String>,
+    /// Geographic / regulatory eligibility gates, e.g.
+    /// `["CannotSeenByChinaClient"]`. Present on historical-best entries.
+    pub eligibility_predicate_ids: Option<Vec<String>>,
+    /// DCat schema version this availability targets (e.g. `6`). Present
+    /// on historical-best entries.
+    pub supported_catalog_version: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

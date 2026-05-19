@@ -16,22 +16,43 @@ pub struct Locale {
     pub market: Market,
     pub language: Lang,
     pub include_neutral: bool,
+    /// When true, [`Self::dcat_trail`] emits the language as a BCP-47 tag
+    /// (`<lang>-<market>`, e.g. `en-US`) instead of the bare ISO 639-1
+    /// code (`en`).
+    ///
+    /// Microsoft returns *more* fields for the full-tag form — most
+    /// notably `LocalizedProperties[].CMSVideos[]` (hero trailers,
+    /// DASH/HLS URLs) is empty for `languages=en` but populated for
+    /// `languages=en-US`. Default `false` for backwards-compatibility
+    /// with [`Self::new`]; [`Self::production`] sets it to `true` since
+    /// the richer response is what callers usually want.
+    #[serde(default)]
+    pub use_full_tag: bool,
 }
 
 impl Locale {
-    /// Create a new `Locale`.
+    /// Create a new `Locale` with [`Self::use_full_tag`] disabled. Use
+    /// [`Self::with_full_tag`] to opt in to the BCP-47 form, or
+    /// [`Self::production`] which enables it by default.
     pub fn new(market: Market, language: Lang, include_neutral: bool) -> Self {
         Locale {
             market,
             language,
             include_neutral,
+            use_full_tag: false,
         }
     }
 
-    /// Default production locale: `US / en`, neutral disabled (`en` is already
-    /// the neutral fallback).
+    /// Default production locale: `US / en`, neutral disabled, full-tag
+    /// emission enabled (so requests carry `languages=en-US` and pick up
+    /// CMS video metadata).
     pub fn production() -> Self {
-        Locale::new(Market::Us, Lang::En, false)
+        Locale {
+            market: Market::Us,
+            language: Lang::En,
+            include_neutral: false,
+            use_full_tag: true,
+        }
     }
 
     /// Build a [`Locale`] from a Microsoft Store BCP-47 [`LanguageTag`].
@@ -49,15 +70,41 @@ impl Locale {
         Ok(Locale::new(market, lang, include_neutral))
     }
 
+    /// Toggle [`Self::use_full_tag`] fluently:
+    ///
+    /// ```
+    /// use storelib_rs::{Lang, Locale, Market};
+    /// let l = Locale::new(Market::Us, Lang::En, false).with_full_tag(true);
+    /// assert!(l.dcat_trail().contains("languages=en-US"));
+    /// ```
+    #[must_use]
+    pub fn with_full_tag(mut self, enabled: bool) -> Self {
+        self.use_full_tag = enabled;
+        self
+    }
+
+    /// Render the language component used in [`Self::dcat_trail`] —
+    /// either `<lang>-<market>` (when [`Self::use_full_tag`] is true) or
+    /// just `<lang>`.
+    fn language_token(&self) -> String {
+        if self.use_full_tag {
+            format!("{}-{}", self.language.as_str(), self.market.as_str())
+        } else {
+            self.language.as_str().to_owned()
+        }
+    }
+
     /// Builds the trailing query-string fragment appended to DCat URLs.
     ///
     /// Examples:
     ///   `market=US&languages=en&catalogsource=apps`
+    ///   `market=US&languages=en-US&catalogsource=apps` (full-tag enabled)
     ///   `market=DE&languages=de,en&catalogsource=apps` (with `include_neutral`)
+    ///   `market=DE&languages=de-DE,en&catalogsource=apps` (both)
     pub fn dcat_trail(&self) -> String {
         let market = self.market.as_str();
-        let lang = self.language.as_str();
-        if self.include_neutral && lang != "en" {
+        let lang = self.language_token();
+        if self.include_neutral && self.language.as_str() != "en" {
             format!("market={market}&languages={lang},en&catalogsource=apps")
         } else {
             format!("market={market}&languages={lang}&catalogsource=apps")
@@ -76,8 +123,51 @@ mod tests {
 
     #[test]
     fn production_locale_trail() {
+        // production() enables full-tag so the DCat response includes
+        // CMSVideos and other region-specific fields.
         let trail = Locale::production().dcat_trail();
-        assert_eq!(trail, "market=US&languages=en&catalogsource=apps");
+        assert_eq!(trail, "market=US&languages=en-US&catalogsource=apps");
+    }
+
+    #[test]
+    fn new_keeps_short_tag_for_backwards_compat() {
+        // Locale::new() defaults use_full_tag=false so existing callers
+        // keep their previous URL shape.
+        let l = Locale::new(Market::Us, Lang::En, false);
+        assert_eq!(l.dcat_trail(), "market=US&languages=en&catalogsource=apps");
+        assert!(!l.use_full_tag);
+    }
+
+    #[test]
+    fn with_full_tag_builder_switches_format() {
+        let l = Locale::new(Market::Us, Lang::En, false).with_full_tag(true);
+        assert_eq!(
+            l.dcat_trail(),
+            "market=US&languages=en-US&catalogsource=apps"
+        );
+        let l = l.with_full_tag(false);
+        assert_eq!(l.dcat_trail(), "market=US&languages=en&catalogsource=apps");
+    }
+
+    #[test]
+    fn full_tag_with_neutral_fallback() {
+        // de-DE,en — the neutral fallback is always the bare `en`, never `en-US`.
+        let l = Locale::new(Market::De, Lang::De, true).with_full_tag(true);
+        assert_eq!(
+            l.dcat_trail(),
+            "market=DE&languages=de-DE,en&catalogsource=apps",
+        );
+    }
+
+    #[test]
+    fn full_tag_neutral_skipped_when_lang_is_en() {
+        // en + full_tag → languages=en-US (no `,en` suffix, even though
+        // include_neutral is true, because the primary lang is already en).
+        let l = Locale::new(Market::Gb, Lang::En, true).with_full_tag(true);
+        assert_eq!(
+            l.dcat_trail(),
+            "market=GB&languages=en-GB&catalogsource=apps"
+        );
     }
 
     #[test]
