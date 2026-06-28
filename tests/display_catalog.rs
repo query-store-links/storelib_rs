@@ -320,7 +320,11 @@ async fn get_packages_for_netflix_returns_resolved_packages() {
 /// Recursively collect every key *path* (dot-joined, lower-cased, array
 /// indices collapsed) appearing in a JSON value. Path-aware so a field dropped
 /// at one location isn't masked by the same key name existing elsewhere.
-fn collect_paths(v: &serde_json::Value, prefix: &str, out: &mut std::collections::BTreeSet<String>) {
+fn collect_paths(
+    v: &serde_json::Value,
+    prefix: &str,
+    out: &mut std::collections::BTreeSet<String>,
+) {
     match v {
         serde_json::Value::Object(m) => {
             for (k, val) in m {
@@ -350,8 +354,7 @@ where
 {
     let model: T = serde_json::from_str(raw).map_err(|e| format!("deserialize: {e}"))?;
     let back = serde_json::to_value(&model).map_err(|e| format!("serialize: {e}"))?;
-    let orig: serde_json::Value =
-        serde_json::from_str(raw).map_err(|e| format!("reparse: {e}"))?;
+    let orig: serde_json::Value = serde_json::from_str(raw).map_err(|e| format!("reparse: {e}"))?;
 
     let mut orig_keys = std::collections::BTreeSet::new();
     let mut back_keys = std::collections::BTreeSet::new();
@@ -462,7 +465,9 @@ async fn dcat_search_model_drops_no_field() {
     let url = "https://displaycatalog.mp.microsoft.com/v7.0/productFamilies/autosuggest\
                ?market=US&languages=en-US&query=netflix&productFamilyNames=apps,games\
                &platformDependencyName=Windows.Desktop";
-    let raw = fetch_raw(url).await.expect("autosuggest should respond 200");
+    let raw = fetch_raw(url)
+        .await
+        .expect("autosuggest should respond 200");
     let dropped = dropped_keys::<DCatSearch>(&raw).expect("search model should deserialize");
     assert!(
         dropped.is_empty(),

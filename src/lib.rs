@@ -49,7 +49,7 @@ pub use models::enums::{
     ProductKind,
 };
 pub use models::fe3::{
-    AppxFamilyMetadata, ApplicabilityBlob, CategoryInformation, ContentTargetPlatform, Deployment,
+    ApplicabilityBlob, AppxFamilyMetadata, CategoryInformation, ContentTargetPlatform, Deployment,
     DigestEntry, PackageInstance, RelationshipGroup, Relationships, ResolvedFileLocation,
     UpdateProperties, UpdateRef,
 };

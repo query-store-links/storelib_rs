@@ -825,14 +825,19 @@ impl DisplayCatalogHandler {
         // Verbose dependency-graph reporting: total the FE3 prerequisite edges
         // (WU category IDs) parsed onto the package instances.
         let total_prereq_edges: usize = instances.iter().map(|i| i.prerequisites.len()).sum();
-        let pkgs_with_prereqs = instances.iter().filter(|i| !i.prerequisites.is_empty()).count();
+        let pkgs_with_prereqs = instances
+            .iter()
+            .filter(|i| !i.prerequisites.is_empty())
+            .count();
         debug!(
             "FE3: {total_prereq_edges} prerequisite edge(s) across {pkgs_with_prereqs}/{} package(s)",
             instances.len(),
         );
         self.progress.emit_counter(
             "fe3.prerequisites",
-            format!("{total_prereq_edges} dependency edge(s) across {pkgs_with_prereqs} package(s)"),
+            format!(
+                "{total_prereq_edges} dependency edge(s) across {pkgs_with_prereqs} package(s)"
+            ),
             pkgs_with_prereqs as u32,
             instances.len() as u32,
         );

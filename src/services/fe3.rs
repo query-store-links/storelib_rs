@@ -1,6 +1,6 @@
 use crate::error::StoreError;
 use crate::models::fe3::{
-    AppxFamilyMetadata, ApplicabilityBlob, CategoryInformation, Deployment, DigestEntry,
+    ApplicabilityBlob, AppxFamilyMetadata, CategoryInformation, Deployment, DigestEntry,
     PackageInstance, RelationshipGroup, Relationships, ResolvedFileLocation, UpdateProperties,
     UpdateRef,
 };
@@ -422,7 +422,9 @@ impl FE3Handler {
                 .map(|c| CategoryInformation {
                     category_type: c.attribute("CategoryType").map(String::from),
                     display_order: c.attribute("DisplayOrder").and_then(|v| v.parse().ok()),
-                    exclude_by_default: c.attribute("ExcludeByDefault").and_then(|v| v.parse().ok()),
+                    exclude_by_default: c
+                        .attribute("ExcludeByDefault")
+                        .and_then(|v| v.parse().ok()),
                     excluded_by_default: c
                         .attribute("ExcludedByDefault")
                         .and_then(|v| v.parse().ok()),
@@ -439,8 +441,10 @@ impl FE3Handler {
             // ----- NewUpdates <Xml>: own identity, <Properties>,
             //       <Relationships>, raw <ApplicabilityRules> ---------------
             let new_xml = node.ancestors().find(|a| a.tag_name().name() == "Xml");
-            let own_identity =
-                new_xml.and_then(|x| x.children().find(|c| c.tag_name().name() == "UpdateIdentity"));
+            let own_identity = new_xml.and_then(|x| {
+                x.children()
+                    .find(|c| c.tag_name().name() == "UpdateIdentity")
+            });
             let revision_number = own_identity
                 .and_then(|n| n.attribute("RevisionNumber"))
                 .map(String::from);
@@ -461,9 +465,10 @@ impl FE3Handler {
             // RevisionNumber. Flat Vec<String> views are derived for
             // convenience (and backward compatibility).
             let mut relationships = Relationships::default();
-            if let Some(rel) =
-                new_xml.and_then(|x| x.children().find(|c| c.tag_name().name() == "Relationships"))
-            {
+            if let Some(rel) = new_xml.and_then(|x| {
+                x.children()
+                    .find(|c| c.tag_name().name() == "Relationships")
+            }) {
                 for child in rel.children() {
                     match child.tag_name().name() {
                         "Prerequisites" => {
@@ -508,7 +513,9 @@ impl FE3Handler {
 
             // ----- <UpdateInfo> envelope: numeric ID, IsLeaf, IsShared,
             //       <Deployment> --------------------------------------------
-            let update_info = node.ancestors().find(|a| a.tag_name().name() == "UpdateInfo");
+            let update_info = node
+                .ancestors()
+                .find(|a| a.tag_name().name() == "UpdateInfo");
             let child_text = |parent: Option<roxmltree::Node>, name: &str| {
                 parent
                     .and_then(|p| p.children().find(|c| c.tag_name().name() == name))
@@ -517,7 +524,8 @@ impl FE3Handler {
             };
             let update_info_id = child_text(update_info, "ID");
             let is_leaf = child_text(update_info, "IsLeaf").and_then(|s| s.parse::<bool>().ok());
-            let is_shared = child_text(update_info, "IsShared").and_then(|s| s.parse::<bool>().ok());
+            let is_shared =
+                child_text(update_info, "IsShared").and_then(|s| s.parse::<bool>().ok());
 
             let deployment = update_info
                 .and_then(|u| u.children().find(|c| c.tag_name().name() == "Deployment"))
@@ -594,7 +602,11 @@ impl FE3Handler {
                 );
             }
             if let Some(n) = appx_install_data {
-                collect_extra(n, &["MainPackage", "PackageFileName"], &mut extra_attributes);
+                collect_extra(
+                    n,
+                    &["MainPackage", "PackageFileName"],
+                    &mut extra_attributes,
+                );
             }
             if let Some(n) = update_props_node {
                 collect_extra(
@@ -1074,7 +1086,9 @@ mod tests {
             vec!["cat-framework-1".to_string(), "cat-framework-2".to_string()],
         );
         // The package's own UpdateIdentity must NOT leak into prerequisites.
-        assert!(!inst.prerequisites.contains(&"own-app-update-id".to_string()));
+        assert!(!inst
+            .prerequisites
+            .contains(&"own-app-update-id".to_string()));
     }
 
     /// Full-fidelity fixture: every element/attribute the real SyncUpdates
@@ -1153,11 +1167,19 @@ mod tests {
         assert_eq!(p.bundled_updates, vec!["child-1", "child-2"]);
         assert_eq!(p.relationships.prerequisites.len(), 2);
         assert_eq!(p.relationships.prerequisites[0].is_category, Some(true));
-        assert_eq!(p.relationships.prerequisites[0].updates[0].update_id, "cat-1");
-        assert_eq!(p.relationships.prerequisites[1].is_category, None);
-        assert_eq!(p.relationships.bundled_updates[0].updates[0].update_id, "child-1");
         assert_eq!(
-            p.relationships.bundled_updates[0].updates[0].revision_number.as_deref(),
+            p.relationships.prerequisites[0].updates[0].update_id,
+            "cat-1"
+        );
+        assert_eq!(p.relationships.prerequisites[1].is_category, None);
+        assert_eq!(
+            p.relationships.bundled_updates[0].updates[0].update_id,
+            "child-1"
+        );
+        assert_eq!(
+            p.relationships.bundled_updates[0].updates[0]
+                .revision_number
+                .as_deref(),
             Some("7"),
         );
 
@@ -1168,7 +1190,10 @@ mod tests {
         assert_eq!(p.is_shared, Some(false));
 
         // File / install data previously dropped.
-        assert_eq!(p.installer_specific_identifier.as_deref(), Some("App.Pkg_1.0_x64__hash"));
+        assert_eq!(
+            p.installer_specific_identifier.as_deref(),
+            Some("App.Pkg_1.0_x64__hash")
+        );
         assert_eq!(p.package_file_name.as_deref(), Some("guid.appxbundle"));
         assert_eq!(p.handler_type.as_deref(), Some("appx:AppxInstaller"));
 
@@ -1193,7 +1218,11 @@ mod tests {
         assert_eq!(dep.priority.as_deref(), Some("0"));
 
         // Nested subtrees preserved verbatim.
-        assert!(p.applicability_rules_xml.as_deref().unwrap().contains("IsInstalled"));
+        assert!(p
+            .applicability_rules_xml
+            .as_deref()
+            .unwrap()
+            .contains("IsInstalled"));
         assert!(p
             .installation_behavior_xml
             .as_deref()
@@ -1202,7 +1231,9 @@ mod tests {
 
         // Catch-all: an unmapped attribute is preserved, not dropped.
         assert_eq!(
-            p.extra_attributes.get("AppxMetadata@FutureAttr").map(String::as_str),
+            p.extra_attributes
+                .get("AppxMetadata@FutureAttr")
+                .map(String::as_str),
             Some("surprise"),
         );
     }

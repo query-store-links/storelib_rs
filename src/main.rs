@@ -507,7 +507,10 @@ mod cli {
 
                 // FE3's own dependency graph: the per-package prerequisite
                 // category IDs from <Relationships><Prerequisites>.
-                let with_prereqs = packages.iter().filter(|p| !p.prerequisites.is_empty()).count();
+                let with_prereqs = packages
+                    .iter()
+                    .filter(|p| !p.prerequisites.is_empty())
+                    .count();
                 log::info!(
                     "FE3 prerequisite edges ({}/{} packages declare prerequisites; ids are WU category GUIDs):",
                     with_prereqs,
