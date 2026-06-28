@@ -1,8 +1,13 @@
 use crate::error::StoreError;
-use crate::models::fe3::{ApplicabilityBlob, DigestEntry, PackageInstance, ResolvedFileLocation};
+use crate::models::fe3::{
+    AppxFamilyMetadata, ApplicabilityBlob, CategoryInformation, Deployment, DigestEntry,
+    PackageInstance, RelationshipGroup, Relationships, ResolvedFileLocation, UpdateProperties,
+    UpdateRef,
+};
 use crate::services::display_catalog::ProgressEmitter;
 use crate::utilities::helpers::string_to_package_type;
 use log::{debug, trace, warn};
+use std::collections::BTreeMap;
 
 // ---------------------------------------------------------------------------
 // Endpoint constants
@@ -249,6 +254,29 @@ impl FE3Handler {
             }
         }
 
+        // Index every <AppxFamilyMetadata> by its Name. Family metadata lives
+        // in separate family/category updates (not as a sibling of the
+        // per-package <AppxMetadata>), and is keyed to packages by the moniker
+        // prefix — everything before the first '_'.
+        let mut family_meta_by_name: std::collections::HashMap<String, AppxFamilyMetadata> =
+            std::collections::HashMap::new();
+        for node in doc.descendants() {
+            if node.tag_name().name() != "AppxFamilyMetadata" {
+                continue;
+            }
+            if let Some(name) = node.attribute("Name") {
+                family_meta_by_name
+                    .entry(name.to_owned())
+                    .or_insert_with(|| AppxFamilyMetadata {
+                        name: Some(name.to_owned()),
+                        publisher: node.attribute("Publisher").map(String::from),
+                        legacy_mobile_product_id: node
+                            .attribute("LegacyMobileProductId")
+                            .map(String::from),
+                    });
+            }
+        }
+
         let mut instances = Vec::new();
         for node in doc.descendants() {
             if node.tag_name().name() != "AppxMetadata" {
@@ -365,42 +393,229 @@ impl FE3Handler {
             let from_store_service = ext_bool("FromStoreService");
             let legacy_mobile_product_id = ext_str("LegacyMobileProductId");
 
-            let main_package = update_xml
-                .and_then(|xml_node| {
-                    xml_node
-                        .descendants()
-                        .find(|c| c.tag_name().name() == "AppxPackageInstallData")
-                })
+            // ----- <AppxPackageInstallData> + <HandlerSpecificData> -------
+            let appx_install_data = update_xml.and_then(|xml_node| {
+                xml_node
+                    .descendants()
+                    .find(|c| c.tag_name().name() == "AppxPackageInstallData")
+            });
+            let main_package = appx_install_data
                 .and_then(|n| n.attribute("MainPackage"))
                 .and_then(|v| v.parse::<bool>().ok());
+            let package_file_name = appx_install_data
+                .and_then(|n| n.attribute("PackageFileName"))
+                .map(String::from);
 
-            // ----- <Relationships>/<Prerequisites> dependency edges ------
-            // The AppxMetadata node lives in the NewUpdates fragment at
-            // Xml/ApplicabilityRules/Metadata/AppxPackageMetadata/AppxMetadata;
-            // the sibling <Relationships><Prerequisites> block under that same
-            // <Xml> carries this package's prerequisite category IDs. Walk up
-            // to the enclosing <Xml> and collect every UpdateID under a
-            // <Prerequisites> (these are WU *category* GUIDs — see
-            // `PackageInstance::prerequisites`). The package's own
-            // <UpdateIdentity> is a direct child of <Xml>, not under
-            // <Prerequisites>, so it is correctly excluded.
-            let prerequisites: Vec<String> = node
-                .ancestors()
-                .find(|a| a.tag_name().name() == "Xml")
-                .map(|xml_node| {
-                    xml_node
-                        .descendants()
-                        .filter(|d| d.tag_name().name() == "Prerequisites")
-                        .flat_map(|p| p.descendants())
-                        .filter(|d| d.tag_name().name() == "UpdateIdentity")
-                        .filter_map(|u| u.attribute("UpdateID").map(String::from))
-                        .collect()
+            let handler_specific = update_xml.and_then(|xml_node| {
+                xml_node
+                    .descendants()
+                    .find(|c| c.tag_name().name() == "HandlerSpecificData")
+            });
+            let handler_type = handler_specific
+                .and_then(|n| n.attribute("type"))
+                .map(String::from);
+            let category_information = handler_specific
+                .and_then(|h| {
+                    h.children()
+                        .find(|c| c.tag_name().name() == "CategoryInformation")
                 })
-                .unwrap_or_default();
+                .map(|c| CategoryInformation {
+                    category_type: c.attribute("CategoryType").map(String::from),
+                    display_order: c.attribute("DisplayOrder").and_then(|v| v.parse().ok()),
+                    exclude_by_default: c.attribute("ExcludeByDefault").and_then(|v| v.parse().ok()),
+                    excluded_by_default: c
+                        .attribute("ExcludedByDefault")
+                        .and_then(|v| v.parse().ok()),
+                    prohibits_subcategories: c
+                        .attribute("ProhibitsSubcategories")
+                        .and_then(|v| v.parse().ok()),
+                    prohibits_updates: c.attribute("ProhibitsUpdates").and_then(|v| v.parse().ok()),
+                });
+
+            let installer_specific_identifier = primary_file
+                .and_then(|f| f.attribute("InstallerSpecificIdentifier"))
+                .map(String::from);
+
+            // ----- NewUpdates <Xml>: own identity, <Properties>,
+            //       <Relationships>, raw <ApplicabilityRules> ---------------
+            let new_xml = node.ancestors().find(|a| a.tag_name().name() == "Xml");
+            let own_identity =
+                new_xml.and_then(|x| x.children().find(|c| c.tag_name().name() == "UpdateIdentity"));
+            let revision_number = own_identity
+                .and_then(|n| n.attribute("RevisionNumber"))
+                .map(String::from);
+
+            let update_props_node =
+                new_xml.and_then(|x| x.children().find(|c| c.tag_name().name() == "Properties"));
+            let update_properties = update_props_node.map(|p| UpdateProperties {
+                apply_package_rank: p.attribute("ApplyPackageRank").map(String::from),
+                explicitly_deployable: p.attribute("ExplicitlyDeployable").map(String::from),
+                is_appx_framework: p.attribute("IsAppxFramework").and_then(|v| v.parse().ok()),
+                package_rank: p.attribute("PackageRank").and_then(|v| v.parse().ok()),
+                per_user: p.attribute("PerUser").map(String::from),
+                update_type: p.attribute("UpdateType").map(String::from),
+            });
+
+            // Full <Relationships> — prerequisites + bundled updates,
+            // preserving <AtLeastOne IsCategory> grouping and per-ref
+            // RevisionNumber. Flat Vec<String> views are derived for
+            // convenience (and backward compatibility).
+            let mut relationships = Relationships::default();
+            if let Some(rel) =
+                new_xml.and_then(|x| x.children().find(|c| c.tag_name().name() == "Relationships"))
+            {
+                for child in rel.children() {
+                    match child.tag_name().name() {
+                        "Prerequisites" => {
+                            relationships.prerequisites = parse_relationship_groups(child)
+                        }
+                        "BundledUpdates" => {
+                            relationships.bundled_updates = parse_relationship_groups(child)
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            let flatten = |groups: &[RelationshipGroup]| -> Vec<String> {
+                groups
+                    .iter()
+                    .flat_map(|g| g.updates.iter())
+                    .map(|u| u.update_id.clone())
+                    .collect()
+            };
+            let prerequisites = flatten(&relationships.prerequisites);
+            let bundled_updates = flatten(&relationships.bundled_updates);
             debug!(
-                "FE3: package {moniker} has {} prerequisite category id(s)",
-                prerequisites.len()
+                "FE3: package {moniker}: {} prerequisite id(s), {} bundled id(s)",
+                prerequisites.len(),
+                bundled_updates.len(),
             );
+
+            // Raw subtrees preserved verbatim so their nested rules aren't lost.
+            let applicability_rules_xml = new_xml
+                .and_then(|x| {
+                    x.children()
+                        .find(|c| c.tag_name().name() == "ApplicabilityRules")
+                })
+                .map(|n| xml[n.range()].to_string());
+            let installation_behavior_xml = ext_props
+                .and_then(|e| {
+                    e.children()
+                        .find(|c| c.tag_name().name() == "InstallationBehavior")
+                })
+                .filter(|n| n.has_children() || n.attributes().next().is_some())
+                .map(|n| xml[n.range()].to_string());
+
+            // ----- <UpdateInfo> envelope: numeric ID, IsLeaf, IsShared,
+            //       <Deployment> --------------------------------------------
+            let update_info = node.ancestors().find(|a| a.tag_name().name() == "UpdateInfo");
+            let child_text = |parent: Option<roxmltree::Node>, name: &str| {
+                parent
+                    .and_then(|p| p.children().find(|c| c.tag_name().name() == name))
+                    .and_then(|c| c.text())
+                    .map(|t| t.trim().to_string())
+            };
+            let update_info_id = child_text(update_info, "ID");
+            let is_leaf = child_text(update_info, "IsLeaf").and_then(|s| s.parse::<bool>().ok());
+            let is_shared = child_text(update_info, "IsShared").and_then(|s| s.parse::<bool>().ok());
+
+            let deployment = update_info
+                .and_then(|u| u.children().find(|c| c.tag_name().name() == "Deployment"))
+                .map(|d| {
+                    let dt = |name: &str| {
+                        d.children()
+                            .find(|c| c.tag_name().name() == name)
+                            .and_then(|c| c.text())
+                            .map(|t| t.trim().to_string())
+                    };
+                    Deployment {
+                        id: dt("ID"),
+                        action: dt("Action"),
+                        is_assigned: dt("IsAssigned"),
+                        last_change_time: dt("LastChangeTime"),
+                        auto_select: dt("AutoSelect"),
+                        auto_download: dt("AutoDownload"),
+                        supersedence_behavior: dt("SupersedenceBehavior"),
+                        priority: dt("Priority"),
+                        handler_specific_action: dt("HandlerSpecificAction"),
+                        flight_id: dt("FlightId"),
+                    }
+                });
+
+            // ----- <AppxFamilyMetadata> — lives in a separate family update;
+            //       associate by moniker family prefix (before the first '_').
+            let family_metadata = moniker
+                .split('_')
+                .next()
+                .and_then(|fam| family_meta_by_name.get(fam))
+                .cloned();
+
+            // ----- Catch-all: any attribute not mapped to a typed field ---
+            let mut extra_attributes: BTreeMap<String, String> = BTreeMap::new();
+            collect_extra(
+                node,
+                &["PackageMoniker", "PackageType", "IsAppxBundle"],
+                &mut extra_attributes,
+            );
+            if let Some(f) = primary_file {
+                collect_extra(
+                    f,
+                    &[
+                        "Digest",
+                        "DigestAlgorithm",
+                        "FileName",
+                        "InstallerSpecificIdentifier",
+                        "Modified",
+                        "PatchingType",
+                        "Size",
+                    ],
+                    &mut extra_attributes,
+                );
+            }
+            if let Some(e) = ext_props {
+                collect_extra(
+                    e,
+                    &[
+                        "ContentType",
+                        "CreationDate",
+                        "DefaultPropertiesLanguage",
+                        "FromStoreService",
+                        "Handler",
+                        "IsAppxFramework",
+                        "LegacyMobileProductId",
+                        "MandatoryDate",
+                        "MandatoryVersion",
+                        "MaxDownloadSize",
+                        "MinDownloadSize",
+                        "PackageContentId",
+                        "PackageIdentityName",
+                    ],
+                    &mut extra_attributes,
+                );
+            }
+            if let Some(n) = appx_install_data {
+                collect_extra(n, &["MainPackage", "PackageFileName"], &mut extra_attributes);
+            }
+            if let Some(n) = update_props_node {
+                collect_extra(
+                    n,
+                    &[
+                        "ApplyPackageRank",
+                        "ExplicitlyDeployable",
+                        "IsAppxFramework",
+                        "PackageRank",
+                        "PerUser",
+                        "UpdateType",
+                    ],
+                    &mut extra_attributes,
+                );
+            }
+            if let Some(n) = handler_specific {
+                collect_extra(n, &["type"], &mut extra_attributes);
+            }
+            if let Some(n) = own_identity {
+                collect_extra(n, &["UpdateID", "RevisionNumber"], &mut extra_attributes);
+            }
 
             // file_size: prefer <File Size>, fall back to
             // <ExtendedProperties MaxDownloadSize>. (DCat is the final
@@ -445,7 +660,27 @@ impl FE3Handler {
 
                 main_package,
 
+                revision_number,
+                update_info_id,
+                is_leaf,
+                is_shared,
+
+                installer_specific_identifier,
+                package_file_name,
+                handler_type,
+
                 prerequisites,
+                bundled_updates,
+                relationships,
+
+                update_properties,
+                family_metadata,
+                category_information,
+                deployment,
+                applicability_rules_xml,
+                installation_behavior_xml,
+
+                extra_attributes,
 
                 all_file_locations: Vec::new(),
             });
@@ -608,6 +843,59 @@ impl FE3Handler {
         }
 
         Ok(all_per_update)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Relationship / attribute parsing helpers
+// ---------------------------------------------------------------------------
+
+/// Build an [`UpdateRef`] from an `<UpdateIdentity>` node, keeping both the
+/// `UpdateID` and the `RevisionNumber`.
+fn update_ref_from(n: roxmltree::Node) -> UpdateRef {
+    UpdateRef {
+        update_id: n.attribute("UpdateID").unwrap_or("").to_string(),
+        revision_number: n.attribute("RevisionNumber").map(String::from),
+    }
+}
+
+/// Parse a `<Prerequisites>` or `<BundledUpdates>` node into
+/// [`RelationshipGroup`]s, preserving `<AtLeastOne IsCategory="…">` grouping
+/// and any bare `<UpdateIdentity>` children.
+fn parse_relationship_groups(parent: roxmltree::Node) -> Vec<RelationshipGroup> {
+    let mut groups = Vec::new();
+    for child in parent.children() {
+        if !child.is_element() {
+            continue;
+        }
+        match child.tag_name().name() {
+            "AtLeastOne" => groups.push(RelationshipGroup {
+                is_category: child.attribute("IsCategory").and_then(|v| v.parse().ok()),
+                updates: child
+                    .descendants()
+                    .filter(|d| d.tag_name().name() == "UpdateIdentity")
+                    .map(update_ref_from)
+                    .collect(),
+            }),
+            "UpdateIdentity" => groups.push(RelationshipGroup {
+                is_category: None,
+                updates: vec![update_ref_from(child)],
+            }),
+            _ => {}
+        }
+    }
+    groups
+}
+
+/// Record every attribute on `node` whose name is not in `known` into `map`,
+/// keyed `"<Element>@<Attr>"`. This guarantees no attribute is ever silently
+/// dropped — including fields Microsoft may add in the future.
+fn collect_extra(node: roxmltree::Node, known: &[&str], map: &mut BTreeMap<String, String>) {
+    let tag = node.tag_name().name();
+    for a in node.attributes() {
+        if !known.contains(&a.name()) {
+            map.insert(format!("{tag}@{}", a.name()), a.value().to_string());
+        }
     }
 }
 
@@ -787,6 +1075,136 @@ mod tests {
         );
         // The package's own UpdateIdentity must NOT leak into prerequisites.
         assert!(!inst.prerequisites.contains(&"own-app-update-id".to_string()));
+    }
+
+    /// Full-fidelity fixture: every element/attribute the real SyncUpdates
+    /// response carries, so the parser is proven to drop nothing.
+    const SYNC_FULL: &str = r#"<?xml version="1.0"?>
+<root>
+  <NewUpdates>
+    <UpdateInfo>
+      <ID>329883205</ID>
+      <Deployment>
+        <ID>578536343</ID>
+        <Action>Install</Action>
+        <IsAssigned>true</IsAssigned>
+        <LastChangeTime>2026-04-02</LastChangeTime>
+        <AutoSelect>1</AutoSelect>
+        <AutoDownload>2</AutoDownload>
+        <SupersedenceBehavior>0</SupersedenceBehavior>
+        <Priority>0</Priority>
+        <HandlerSpecificAction>0</HandlerSpecificAction>
+        <FlightId>ABC</FlightId>
+      </Deployment>
+      <IsLeaf>true</IsLeaf>
+      <IsShared>false</IsShared>
+      <Xml>
+        <UpdateIdentity UpdateID="own-update" RevisionNumber="42"/>
+        <Properties UpdateType="Software" PackageRank="1000" PerUser="false" IsAppxFramework="true" ApplyPackageRank="true" ExplicitlyDeployable="true"><SecuredFragment/></Properties>
+        <Relationships>
+          <Prerequisites>
+            <AtLeastOne IsCategory="true"><UpdateIdentity UpdateID="cat-1"/></AtLeastOne>
+            <UpdateIdentity UpdateID="direct-prereq"/>
+          </Prerequisites>
+          <BundledUpdates>
+            <UpdateIdentity UpdateID="child-1" RevisionNumber="7"/>
+            <UpdateIdentity UpdateID="child-2"/>
+          </BundledUpdates>
+        </Relationships>
+        <ApplicabilityRules><IsInstalled><True/></IsInstalled></ApplicabilityRules>
+        <Metadata>
+          <AppxPackageMetadata>
+            <AppxFamilyMetadata Name="App.Pkg" Publisher="CN=Test" LegacyMobileProductId="legacy-1"/>
+            <AppxMetadata PackageMoniker="App.Pkg_1.0_x64__hash" PackageType="AppX" IsAppxBundle="false" FutureAttr="surprise">{"content.packageId":"abc"}</AppxMetadata>
+          </AppxPackageMetadata>
+        </Metadata>
+      </Xml>
+    </UpdateInfo>
+  </NewUpdates>
+  <ExtendedUpdateInfo>
+    <Updates>
+      <Update>
+        <ID>329883205</ID>
+        <Xml>
+          <ExtendedProperties Handler="appx" IsAppxFramework="true" MaxDownloadSize="123" PackageIdentityName="App.Pkg">
+            <InstallationBehavior RebootRequired="false"/>
+          </ExtendedProperties>
+          <Files>
+            <File FileName="guid.appxbundle" InstallerSpecificIdentifier="App.Pkg_1.0_x64__hash" Digest="abc" DigestAlgorithm="SHA1" Size="123" Modified="2026-01-01"/>
+          </Files>
+          <HandlerSpecificData type="appx:AppxInstaller">
+            <AppxPackageInstallData MainPackage="true" PackageFileName="guid.appxbundle"/>
+            <CategoryInformation CategoryType="App" DisplayOrder="5" ExcludeByDefault="false" ExcludedByDefault="false" ProhibitsSubcategories="true" ProhibitsUpdates="false"/>
+          </HandlerSpecificData>
+        </Xml>
+      </Update>
+    </Updates>
+  </ExtendedUpdateInfo>
+</root>"#;
+
+    #[tokio::test]
+    async fn get_package_instances_captures_every_field() {
+        let pkgs = FE3Handler::get_package_instances(SYNC_FULL).await.unwrap();
+        assert_eq!(pkgs.len(), 1);
+        let p = &pkgs[0];
+
+        // Relationships — full structure + flat views, nothing dropped.
+        assert_eq!(p.prerequisites, vec!["cat-1", "direct-prereq"]);
+        assert_eq!(p.bundled_updates, vec!["child-1", "child-2"]);
+        assert_eq!(p.relationships.prerequisites.len(), 2);
+        assert_eq!(p.relationships.prerequisites[0].is_category, Some(true));
+        assert_eq!(p.relationships.prerequisites[0].updates[0].update_id, "cat-1");
+        assert_eq!(p.relationships.prerequisites[1].is_category, None);
+        assert_eq!(p.relationships.bundled_updates[0].updates[0].update_id, "child-1");
+        assert_eq!(
+            p.relationships.bundled_updates[0].updates[0].revision_number.as_deref(),
+            Some("7"),
+        );
+
+        // Update identity / envelope.
+        assert_eq!(p.revision_number.as_deref(), Some("42"));
+        assert_eq!(p.update_info_id.as_deref(), Some("329883205"));
+        assert_eq!(p.is_leaf, Some(true));
+        assert_eq!(p.is_shared, Some(false));
+
+        // File / install data previously dropped.
+        assert_eq!(p.installer_specific_identifier.as_deref(), Some("App.Pkg_1.0_x64__hash"));
+        assert_eq!(p.package_file_name.as_deref(), Some("guid.appxbundle"));
+        assert_eq!(p.handler_type.as_deref(), Some("appx:AppxInstaller"));
+
+        // Rich blocks previously dropped entirely.
+        let up = p.update_properties.as_ref().unwrap();
+        assert_eq!(up.update_type.as_deref(), Some("Software"));
+        assert_eq!(up.package_rank, Some(1000));
+        assert_eq!(up.is_appx_framework, Some(true));
+
+        let fam = p.family_metadata.as_ref().unwrap();
+        assert_eq!(fam.name.as_deref(), Some("App.Pkg"));
+        assert_eq!(fam.legacy_mobile_product_id.as_deref(), Some("legacy-1"));
+
+        let cat = p.category_information.as_ref().unwrap();
+        assert_eq!(cat.category_type.as_deref(), Some("App"));
+        assert_eq!(cat.display_order, Some(5));
+        assert_eq!(cat.prohibits_subcategories, Some(true));
+
+        let dep = p.deployment.as_ref().unwrap();
+        assert_eq!(dep.action.as_deref(), Some("Install"));
+        assert_eq!(dep.flight_id.as_deref(), Some("ABC"));
+        assert_eq!(dep.priority.as_deref(), Some("0"));
+
+        // Nested subtrees preserved verbatim.
+        assert!(p.applicability_rules_xml.as_deref().unwrap().contains("IsInstalled"));
+        assert!(p
+            .installation_behavior_xml
+            .as_deref()
+            .unwrap()
+            .contains("RebootRequired"));
+
+        // Catch-all: an unmapped attribute is preserved, not dropped.
+        assert_eq!(
+            p.extra_attributes.get("AppxMetadata@FutureAttr").map(String::as_str),
+            Some("surprise"),
+        );
     }
 
     #[tokio::test]

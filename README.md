@@ -107,6 +107,15 @@ for pkg in &packages {
 }
 ```
 
+Every `PackageInstance` preserves the **complete** FE3 `SyncUpdates` record —
+no field is dropped. Beyond the download fields it carries the full
+`relationships` graph (`prerequisites` + `bundled_updates`, with `IsCategory`
+grouping and per-ref revision numbers), the `deployment` block,
+`update_properties`, `family_metadata`, `category_information`, the raw
+`applicability_rules_xml` / `installation_behavior_xml` subtrees, and an
+`extra_attributes` catch-all that captures any attribute not mapped to a typed
+field (so future Microsoft additions are never lost).
+
 ### Resolve package download URLs
 
 ```rust

@@ -549,14 +549,16 @@ impl DisplayCatalogHandlerJs {
     /// Resolve the direct download URLs for the currently-loaded product.
     /// Requires `queryDcat` to have been called successfully first.
     ///
-    /// Returns `Array<{packageMoniker, packageUri, packageType, applicabilityBlob,
-    /// updateId, packageSize, prerequisites, …}>`. `packageSize` is in bytes;
-    /// prefer it over a HEAD request on `packageUri`. It's `null` only for
-    /// framework packages that DCat doesn't list a size for. `prerequisites`
-    /// is the package's FE3 dependency edges (Windows-Update category GUIDs);
-    /// for the *named* framework dependency map use the handler's
-    /// `frameworkDependencies` getter. Pass an `AbortSignal` to cancel stalled
-    /// FE3 SOAP calls.
+    /// Returns `PackageInstance[]` — see the `PackageInstance` type for the
+    /// full shape. Beyond the download fields (`packageMoniker`, `packageUri`,
+    /// `packageSize`, …) each entry carries the complete SyncUpdates metadata
+    /// with nothing dropped: `prerequisites` / `bundledUpdates` / the full
+    /// `relationships` graph, `deployment`, `updateProperties`,
+    /// `familyMetadata`, `categoryInformation`, raw `applicabilityRulesXml`,
+    /// and an `extraAttributes` catch-all. `packageSize` is in bytes (prefer
+    /// it over a HEAD on `packageUri`); for the *named* framework dependency
+    /// map use the handler's `frameworkDependencies` getter. Pass an
+    /// `AbortSignal` to cancel stalled FE3 SOAP calls.
     #[wasm_bindgen(
         js_name = getPackagesForProduct,
         unchecked_return_type = "PackageInstance[]"

@@ -35,19 +35,24 @@ pub use error::StoreError;
 // models
 pub use models::addon::Addon;
 pub use models::catalog::{
-    AllowedPlatform, AlternateId, Application, Availability, AvailabilityProperties,
-    ClientConditions, CmsVideo, Conditions, ContentRating, DisplayCatalogModel,
-    DisplaySkuAvailability, FrameworkDependency, FulfillmentData, HardwareProperties, Image,
-    LegalText, LicensingData, OrderManagementData, Package, PackageDownloadUri, PiFilter,
-    PlatformDependency, Price, Product, ProductLocalizedProperty, ProductMarketProperty,
-    ProductProperties, SatisfyingEntitlementKey, SearchTitle, Sku, SkuLocalizedProperty,
-    SkuMarketProperty, SkuProperties, UsageDatum, ValidationData,
+    AllowedPlatform, AlternateId, ApplicableLegacyPlatform, Application, Availability,
+    AvailabilityProperties, ClientConditions, CmsVideo, Conditions, ContentRating,
+    DisplayCatalogModel, DisplaySkuAvailability, FrameworkDependency, FulfillmentData,
+    HardwareProperties, Image, LegalText, LicensingData, OrderManagementData, Package,
+    PackageDownloadUri, PiFilter, PlatformDependency, Price, Product, ProductLocalizedProperty,
+    ProductMarketProperty, ProductProperties, Remediation, SatisfyingEntitlementKey, SearchTitle,
+    Sku, SkuDisplayGroup, SkuLocalizedProperty, SkuMarketProperty, SkuProperties, UsageDatum,
+    ValidationData, WebBlendsData,
 };
 pub use models::enums::{
     DCatEndpoint, DeviceFamily, DisplayCatalogResult, IdentifierType, ImagePurpose, PackageType,
     ProductKind,
 };
-pub use models::fe3::{ApplicabilityBlob, ContentTargetPlatform, PackageInstance};
+pub use models::fe3::{
+    AppxFamilyMetadata, ApplicabilityBlob, CategoryInformation, ContentTargetPlatform, Deployment,
+    DigestEntry, PackageInstance, RelationshipGroup, Relationships, ResolvedFileLocation,
+    UpdateProperties, UpdateRef,
+};
 pub use models::locale::{Lang, LanguageTag, Locale, Market};
 pub use models::search::{DCatSearch, SearchResult};
 

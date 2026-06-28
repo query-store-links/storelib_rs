@@ -269,6 +269,16 @@ char* storelib_query_batch_json_with_cancel(
  *                                          is the product's own WuCategoryId.
  *                                          For named deps use
  *                                          storelib_framework_dependencies_json.)
+ *   "bundledUpdates"     : string[]       (child update GUIDs this update bundles)
+ *   "relationships"      : object         (full <Relationships> graph with
+ *                                          IsCategory grouping + revisionNumbers)
+ *
+ * The object additionally carries the complete SyncUpdates metadata with no
+ * field dropped: "revisionNumber", "updateInfoId", "isLeaf", "isShared",
+ * "installerSpecificIdentifier", "packageFileName", "handlerType",
+ * "updateProperties", "familyMetadata", "categoryInformation", "deployment",
+ * "applicabilityRulesXml", "installationBehaviorXml", plus an
+ * "extraAttributes" map that preserves any attribute not mapped above.
  *
  * @param handle     A valid handle after a successful storelib_query().
  * @param msa_token  Optional auth token, or NULL.

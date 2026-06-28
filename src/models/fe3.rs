@@ -1,5 +1,95 @@
 use crate::models::enums::PackageType;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+
+// ---------------------------------------------------------------------------
+// FE3 SyncUpdates sub-structures (full-fidelity capture — nothing dropped)
+// ---------------------------------------------------------------------------
+
+/// One `<UpdateIdentity>` reference (carries both `UpdateID` and the
+/// `RevisionNumber`, neither of which is dropped).
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateRef {
+    pub update_id: String,
+    pub revision_number: Option<String>,
+}
+
+/// A relationship entry: either a bare `<UpdateIdentity>` child
+/// (`is_category` = `None`, one ref) or an `<AtLeastOne IsCategory="…">`
+/// wrapper around one or more refs. Both forms appear under
+/// `<Prerequisites>` and `<BundledUpdates>`.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelationshipGroup {
+    /// `IsCategory` from the `<AtLeastOne>` wrapper (`None` for a bare
+    /// `<UpdateIdentity>` not inside an `<AtLeastOne>`).
+    pub is_category: Option<bool>,
+    pub updates: Vec<UpdateRef>,
+}
+
+/// The complete `<Relationships>` block from a `SyncUpdates` update — both
+/// the `<Prerequisites>` (dependency) graph and the `<BundledUpdates>`
+/// (bundle → child) graph, with grouping and `IsCategory`/`RevisionNumber`
+/// preserved.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Relationships {
+    pub prerequisites: Vec<RelationshipGroup>,
+    pub bundled_updates: Vec<RelationshipGroup>,
+}
+
+/// `<AppxFamilyMetadata>` — package-family identity that sits next to
+/// `<AppxMetadata>` under `<AppxPackageMetadata>`.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppxFamilyMetadata {
+    pub name: Option<String>,
+    pub publisher: Option<String>,
+    pub legacy_mobile_product_id: Option<String>,
+}
+
+/// `<CategoryInformation>` under `<HandlerSpecificData>`.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CategoryInformation {
+    pub category_type: Option<String>,
+    pub display_order: Option<i64>,
+    pub exclude_by_default: Option<bool>,
+    pub excluded_by_default: Option<bool>,
+    pub prohibits_subcategories: Option<bool>,
+    pub prohibits_updates: Option<bool>,
+}
+
+/// The update-level `<Properties>` element (distinct from the per-binary
+/// `<ExtendedProperties>`): deployment ranking / type flags.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateProperties {
+    pub apply_package_rank: Option<String>,
+    pub explicitly_deployable: Option<String>,
+    pub is_appx_framework: Option<bool>,
+    pub package_rank: Option<i64>,
+    pub per_user: Option<String>,
+    pub update_type: Option<String>,
+}
+
+/// The `<Deployment>` block under `<UpdateInfo>` (server-side deployment
+/// metadata for the update).
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Deployment {
+    pub id: Option<String>,
+    pub action: Option<String>,
+    pub is_assigned: Option<String>,
+    pub last_change_time: Option<String>,
+    pub auto_select: Option<String>,
+    pub auto_download: Option<String>,
+    pub supersedence_behavior: Option<String>,
+    pub priority: Option<String>,
+    pub handler_specific_action: Option<String>,
+    pub flight_id: Option<String>,
+}
 
 /// A named hash returned by FE3 (`AdditionalDigest`, `PiecesHashDigest`,
 /// `BlockMapDigest`). `algorithm` is the wire string (e.g. `"SHA256"`).
@@ -127,19 +217,71 @@ pub struct PackageInstance {
     pub main_package: Option<bool>,
 
     // ---------------------------------------------------------------
-    // <Relationships> / <Prerequisites> (FE3 dependency graph)
+    // Update identity / <UpdateInfo> envelope
     // ---------------------------------------------------------------
-    /// Prerequisite Windows-Update **category** IDs for this package, taken
-    /// from `<Relationships><Prerequisites>…<UpdateIdentity UpdateID="…"/>`
-    /// in the `SyncUpdates` response. These are *category* GUIDs, not update
-    /// GUIDs: one of them is the product's own `WuCategoryId`, and the rest
-    /// identify the framework categories (VCLibs, WindowsAppRuntime, .NET
-    /// Native, …) the package depends on. This is FE3's native expression of
-    /// the package dependency graph — it does **not** name the dependencies;
-    /// for human-readable PFNs use DisplayCatalog's
-    /// [`crate::models::catalog::FrameworkDependency`] instead. Empty when the
-    /// update declared no prerequisites.
+    /// `RevisionNumber` from the update's own `<UpdateIdentity>`.
+    pub revision_number: Option<String>,
+    /// Server-side numeric `<ID>` of the owning `<UpdateInfo>` (distinct from
+    /// the `<UpdateIdentity>` GUID in [`Self::update_id`]).
+    pub update_info_id: Option<String>,
+    /// `<IsLeaf>` flag on the `<UpdateInfo>`.
+    pub is_leaf: Option<bool>,
+    /// `<IsShared>` flag on the `<UpdateInfo>`.
+    pub is_shared: Option<bool>,
+
+    // ---------------------------------------------------------------
+    // <File> / install data (previously-dropped fields)
+    // ---------------------------------------------------------------
+    /// `<File InstallerSpecificIdentifier="…">` — equals the package moniker,
+    /// but preserved verbatim so no attribute is lost.
+    pub installer_specific_identifier: Option<String>,
+    /// `<AppxPackageInstallData PackageFileName="…">` — the FE3 file name
+    /// (GUID + extension) for this package's primary binary.
+    pub package_file_name: Option<String>,
+    /// `<HandlerSpecificData type="…">`, e.g. `"appx:AppxInstaller"`.
+    pub handler_type: Option<String>,
+
+    // ---------------------------------------------------------------
+    // <Relationships> (FE3 dependency graph) — full fidelity + flat views
+    // ---------------------------------------------------------------
+    /// Prerequisite Windows-Update **category** IDs for this package
+    /// (flattened convenience view of `relationships.prerequisites`). These
+    /// are *category* GUIDs, not update GUIDs: one is the product's own
+    /// `WuCategoryId`, the rest identify the framework categories (VCLibs,
+    /// WindowsAppRuntime, .NET Native, …) the package depends on. For
+    /// human-readable PFNs use DisplayCatalog's
+    /// [`crate::models::catalog::FrameworkDependency`].
     pub prerequisites: Vec<String>,
+    /// Flattened convenience view of `relationships.bundled_updates` — the
+    /// child update GUIDs this update bundles (empty for leaf packages).
+    pub bundled_updates: Vec<String>,
+    /// The complete `<Relationships>` block, preserving grouping,
+    /// `IsCategory`, and per-ref `RevisionNumber` that the flat views drop.
+    pub relationships: Relationships,
+
+    // ---------------------------------------------------------------
+    // Rich metadata blocks (previously dropped entirely)
+    // ---------------------------------------------------------------
+    /// Update-level `<Properties>` (deployment ranking / type flags).
+    pub update_properties: Option<UpdateProperties>,
+    /// `<AppxFamilyMetadata>` package-family identity.
+    pub family_metadata: Option<AppxFamilyMetadata>,
+    /// `<CategoryInformation>` under `<HandlerSpecificData>`.
+    pub category_information: Option<CategoryInformation>,
+    /// `<Deployment>` block from the `<UpdateInfo>`.
+    pub deployment: Option<Deployment>,
+    /// Raw inner XML of `<ApplicabilityRules>` (the `IsInstalled` /
+    /// `IsInstallable` evaluation tree), preserved verbatim so its nested
+    /// rules are never lost. `None` when the update had no rules block.
+    pub applicability_rules_xml: Option<String>,
+    /// Raw XML of `<InstallationBehavior>` when present and non-empty.
+    pub installation_behavior_xml: Option<String>,
+
+    /// Catch-all for any attribute on a parsed element that is not mapped to
+    /// a typed field above — keyed `"<Element>@<Attr>"`. Guarantees no
+    /// attribute is ever silently dropped, including fields Microsoft may add
+    /// in the future. Empty for responses fully covered by the typed fields.
+    pub extra_attributes: BTreeMap<String, String>,
 
     // ---------------------------------------------------------------
     // <FileLocation> entries (GetExtendedUpdateInfo2)

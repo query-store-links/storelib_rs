@@ -22,6 +22,9 @@ const NETFLIX_PFN: &str = "4DF9E0F8.Netflix_mcm4njqhnhss8";
 // Two other stable apps for batch testing — Hulu and Disney+.
 const HULU_PRODUCT_ID: &str = "9WZDNCRFJ3R8";
 const DISNEY_PRODUCT_ID: &str = "9NXQXXLFST89";
+// WhatsApp — a WinUI app with bundled updates + rich SyncUpdates metadata,
+// good for exercising the full-fidelity FE3 capture.
+const WHATSAPP_PRODUCT_ID: &str = "9NKSQGP7F2NH";
 
 fn make_handler() -> DisplayCatalogHandler {
     DisplayCatalogHandler::production()
@@ -308,6 +311,248 @@ async fn get_packages_for_netflix_returns_resolved_packages() {
             p.readable_file_name,
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Field-coverage audit: prove the DisplayCatalog JSON model drops no key
+// ---------------------------------------------------------------------------
+
+/// Recursively collect every key *path* (dot-joined, lower-cased, array
+/// indices collapsed) appearing in a JSON value. Path-aware so a field dropped
+/// at one location isn't masked by the same key name existing elsewhere.
+fn collect_paths(v: &serde_json::Value, prefix: &str, out: &mut std::collections::BTreeSet<String>) {
+    match v {
+        serde_json::Value::Object(m) => {
+            for (k, val) in m {
+                let path = if prefix.is_empty() {
+                    k.to_lowercase()
+                } else {
+                    format!("{prefix}.{}", k.to_lowercase())
+                };
+                out.insert(path.clone());
+                collect_paths(val, &path, out);
+            }
+        }
+        // Array elements share the parent path (so [0].foo and [1].foo merge).
+        serde_json::Value::Array(a) => a.iter().for_each(|x| collect_paths(x, prefix, out)),
+        _ => {}
+    }
+}
+
+/// Deserialize `raw` into `T`, re-serialize, and return the set of original
+/// key *paths* not present in the re-serialized output (i.e. fields the typed
+/// model silently dropped). Case-insensitive to absorb the PascalCase→camelCase
+/// wire transform. Paths under `serde_json::Value` fields survive (re-emitted
+/// verbatim) so they are correctly not flagged.
+fn dropped_keys<T>(raw: &str) -> Result<std::collections::BTreeSet<String>, String>
+where
+    T: serde::de::DeserializeOwned + serde::Serialize,
+{
+    let model: T = serde_json::from_str(raw).map_err(|e| format!("deserialize: {e}"))?;
+    let back = serde_json::to_value(&model).map_err(|e| format!("serialize: {e}"))?;
+    let orig: serde_json::Value =
+        serde_json::from_str(raw).map_err(|e| format!("reparse: {e}"))?;
+
+    let mut orig_keys = std::collections::BTreeSet::new();
+    let mut back_keys = std::collections::BTreeSet::new();
+    collect_paths(&orig, "", &mut orig_keys);
+    collect_paths(&back, "", &mut back_keys);
+    Ok(orig_keys.difference(&back_keys).cloned().collect())
+}
+
+async fn fetch_raw(url: &str) -> Option<String> {
+    let client = reqwest::Client::builder()
+        .user_agent("StoreLib")
+        .build()
+        .unwrap();
+    let resp = client.get(url).send().await.expect("request should send");
+    if !resp.status().is_success() {
+        eprintln!("skip (HTTP {}): {url}", resp.status());
+        return None;
+    }
+    Some(resp.text().await.expect("body should read"))
+}
+
+/// Pull a handful of product IDs out of an autosuggest search so the audit
+/// covers product *types* (games, etc.) without hard-coding fragile IDs.
+async fn discover_ids(query: &str, family: DeviceFamily) -> Vec<String> {
+    let mut h = make_handler();
+    let res = match h.search_dcat(query, family).await {
+        Ok(r) => r,
+        Err(_) => return vec![],
+    };
+    res.results
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .flat_map(|g| g.products.as_deref().unwrap_or(&[]))
+        .filter_map(|p| p.product_id.clone())
+        .take(4)
+        .collect()
+}
+
+#[tokio::test]
+#[ignore]
+async fn dcat_product_model_drops_no_field() {
+    use storelib_rs::models::catalog::DisplayCatalogModel;
+    // A spread of product types to maximise field coverage: known apps +
+    // dynamically-discovered games / store entries.
+    let mut ids: Vec<String> = vec![
+        NETFLIX_PRODUCT_ID.into(),
+        WHATSAPP_PRODUCT_ID.into(),
+        HULU_PRODUCT_ID.into(),
+        DISNEY_PRODUCT_ID.into(),
+        "9NCBCSZSJRSB".into(), // Spotify
+        "9MZ95KL8MR0L".into(), // Microsoft To Do
+        "9WZDNCRFHVN5".into(), // Microsoft Solitaire Collection (game)
+    ];
+    for (q, fam) in [
+        ("forza", DeviceFamily::Xbox),
+        ("minecraft", DeviceFamily::Desktop),
+        ("call of duty", DeviceFamily::Xbox),
+        ("microsoft edge", DeviceFamily::Desktop),
+        ("fifa", DeviceFamily::Xbox),
+        ("the sims", DeviceFamily::Desktop),
+        ("xbox game pass", DeviceFamily::Xbox),
+        ("age of empires", DeviceFamily::Desktop),
+        ("powerpoint", DeviceFamily::Desktop),
+    ] {
+        ids.extend(discover_ids(q, fam).await);
+    }
+    ids.sort();
+    ids.dedup();
+
+    // Audit each id in both the US/en market and a non-US market (DE/de),
+    // since locale can surface market-specific fields.
+    let markets = [("US", "en"), ("DE", "de")];
+    let mut all_dropped = std::collections::BTreeSet::new();
+    for id in &ids {
+        for (market, lang) in markets {
+            let url = format!(
+                "https://displaycatalog.mp.microsoft.com/v7.0/products/{id}\
+                 ?market={market}&languages={lang}&catalogsource=apps&fieldsTemplate=Details"
+            );
+            let Some(raw) = fetch_raw(&url).await else {
+                continue;
+            };
+            match dropped_keys::<DisplayCatalogModel>(&raw) {
+                Ok(dropped) => {
+                    if !dropped.is_empty() {
+                        eprintln!("[{id} {market}] dropped keys: {dropped:?}");
+                    }
+                    all_dropped.extend(dropped);
+                }
+                Err(e) => {
+                    eprintln!("[{id} {market}] MODEL ERROR: {e}");
+                    all_dropped.insert(format!("{id} {market}: {e}"));
+                }
+            }
+        }
+    }
+    assert!(
+        all_dropped.is_empty(),
+        "DisplayCatalog model dropped these keys (add them to the model): {all_dropped:?}",
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn dcat_search_model_drops_no_field() {
+    use storelib_rs::models::search::DCatSearch;
+    let url = "https://displaycatalog.mp.microsoft.com/v7.0/productFamilies/autosuggest\
+               ?market=US&languages=en-US&query=netflix&productFamilyNames=apps,games\
+               &platformDependencyName=Windows.Desktop";
+    let raw = fetch_raw(url).await.expect("autosuggest should respond 200");
+    let dropped = dropped_keys::<DCatSearch>(&raw).expect("search model should deserialize");
+    assert!(
+        dropped.is_empty(),
+        "DCat search model dropped these keys (add them to the model): {dropped:?}",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Full-fidelity FE3 capture (nothing dropped)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore]
+async fn fe3_capture_preserves_every_field_for_whatsapp() {
+    let mut handler = make_handler();
+    handler
+        .query_dcat(WHATSAPP_PRODUCT_ID, IdentifierType::ProductId, None)
+        .await
+        .expect("query_dcat should succeed");
+
+    let packages = handler
+        .get_packages_for_product(None)
+        .await
+        .expect("get_packages_for_product should succeed");
+    assert!(!packages.is_empty(), "WhatsApp should resolve packages");
+
+    // The previously-dropped fields must now be populated for real packages.
+    assert!(
+        packages.iter().any(|p| !p.prerequisites.is_empty()),
+        "at least one package should carry prerequisite category ids",
+    );
+    assert!(
+        packages
+            .iter()
+            .any(|p| !p.relationships.prerequisites.is_empty()),
+        "structured relationships.prerequisites should be populated",
+    );
+    assert!(
+        packages.iter().any(|p| p.revision_number.is_some()),
+        "revision_number should be captured",
+    );
+    assert!(
+        packages.iter().any(|p| p.update_info_id.is_some()),
+        "update_info_id should be captured",
+    );
+    assert!(
+        packages
+            .iter()
+            .any(|p| p.installer_specific_identifier.is_some()),
+        "installer_specific_identifier should be captured",
+    );
+    assert!(
+        packages.iter().any(|p| p.package_file_name.is_some()),
+        "package_file_name should be captured",
+    );
+    assert!(
+        packages.iter().any(|p| p.handler_type.is_some()),
+        "handler_type should be captured",
+    );
+    assert!(
+        packages.iter().any(|p| p.deployment.is_some()),
+        "deployment block should be captured",
+    );
+    assert!(
+        packages.iter().any(|p| p.family_metadata.is_some()),
+        "family_metadata should be captured",
+    );
+    assert!(
+        packages.iter().any(|p| p.update_properties.is_some()),
+        "update_properties should be captured",
+    );
+    assert!(
+        packages.iter().any(|p| p.applicability_rules_xml.is_some()),
+        "applicability_rules_xml should be captured",
+    );
+
+    // The catch-all proves nothing is silently dropped: with the current MS
+    // wire format every attribute maps to a typed field, so it must be empty.
+    // If Microsoft adds a new attribute this fails loudly AND the value is
+    // still preserved in `extra_attributes` (never dropped) — at which point
+    // it should be promoted to a typed field.
+    let leftovers: Vec<(String, String)> = packages
+        .iter()
+        .flat_map(|p| p.extra_attributes.iter())
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "unmapped attributes leaked into extra_attributes (preserved, not dropped): {leftovers:?}",
+    );
 }
 
 // ---------------------------------------------------------------------------

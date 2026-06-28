@@ -57,6 +57,25 @@ pub struct Product {
     /// `"Game"`). For the typed enum see [`ProductKind`].
     #[serde(default, rename(serialize = "type", deserialize = "Type"))]
     pub r#type: Option<String>,
+    /// Microsoft Store Product ID. Returned at the top level by both the
+    /// product endpoint (`/products/{id}`) and autosuggest (e.g.
+    /// `"9WZDNCRFJ3TJ"`).
+    #[serde(default)]
+    pub product_id: Option<String>,
+    /// Autosuggest-only flat image metadata: the type-ahead endpoint returns
+    /// a single image's fields directly on the product instead of under
+    /// [`Self::localized_properties`]`[].images`.
+    #[serde(default)]
+    pub image_type: Option<String>,
+    #[serde(default)]
+    pub background_color: Option<String>,
+    #[serde(default)]
+    pub height: Option<i64>,
+    #[serde(default)]
+    pub width: Option<i64>,
+    /// Autosuggest platform properties (shape varies — often an empty array).
+    #[serde(default)]
+    pub platform_properties: Option<serde_json::Value>,
     pub market_properties: Option<Vec<ProductMarketProperty>>,
     #[serde(rename(serialize = "productASchema", deserialize = "ProductASchema"))]
     pub product_a_schema: Option<String>,
@@ -100,6 +119,30 @@ pub struct ValidationData {
 #[serde(rename_all(serialize = "camelCase", deserialize = "PascalCase"))]
 pub struct ProductProperties {
     pub attributes: Option<Vec<serde_json::Value>>,
+    /// Opaque extended product metadata (a string id for most products;
+    /// kept as `Value` since the shape isn't documented).
+    #[serde(default)]
+    pub extended_metadata: Option<serde_json::Value>,
+    #[serde(default)]
+    pub is_demo: Option<bool>,
+    /// Date (ISO 8601) before which the product is private. Despite the
+    /// `Hint` suffix it is a timestamp string, not a bool.
+    #[serde(default)]
+    pub is_private_before_date_hint: Option<String>,
+    /// SKU display grouping used by the Store UI (e.g. edition pickers).
+    #[serde(default)]
+    pub sku_display_groups: Option<Vec<SkuDisplayGroup>>,
+    /// Entitlement classifiers (e.g. `["Consumable"]`).
+    #[serde(default)]
+    pub entitlement_properties: Option<Vec<serde_json::Value>>,
+    /// In-app offer display token (e.g. `"MS 750 FIFA Points"`).
+    #[serde(default)]
+    pub in_app_offer_token: Option<String>,
+    #[serde(default)]
+    pub is_omex_product: Option<bool>,
+    /// Primary category string (e.g. `"Game"`).
+    #[serde(default)]
+    pub primary_category: Option<String>,
     pub can_install_to_sd_card: Option<bool>,
     pub category: Option<String>,
     pub sub_category: Option<String>,
@@ -137,6 +180,14 @@ pub struct ProductProperties {
     pub revision_id: Option<String>,
     pub product_group_id: Option<String>,
     pub product_group_name: Option<String>,
+}
+
+/// One entry in [`ProductProperties::sku_display_groups`].
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all(serialize = "camelCase", deserialize = "PascalCase"))]
+pub struct SkuDisplayGroup {
+    pub id: Option<String>,
+    pub treatment: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -279,7 +330,10 @@ pub struct Image {
     pub uri: Option<String>,
     pub width: Option<i64>,
     /// EIS (Enterprise/Internal Store) listing identifier — explicit
-    /// rename to preserve the `EIS` casing across the wire.
+    /// rename to preserve the `EIS` casing across the wire. Shape varies:
+    /// a bare string for some listings, an object
+    /// (`{ListingId, AssetId, …}`) for games, so kept as `Value` to accept
+    /// both without dropping the value.
     #[serde(
         default,
         rename(
@@ -287,7 +341,7 @@ pub struct Image {
             deserialize = "EISListingIdentifier"
         )
     )]
-    pub eis_listing_identifier: Option<String>,
+    pub eis_listing_identifier: Option<serde_json::Value>,
     /// Microsoft asset / CDN file id (numeric string), e.g.
     /// `"3067298299926220602"`.
     #[serde(default)]
@@ -334,6 +388,10 @@ pub struct Sku {
     pub sku_type: Option<String>,
     pub recurrence_policy: Option<serde_json::Value>,
     pub subscription_policy_id: Option<serde_json::Value>,
+    /// Microsoft Store Product ID this SKU belongs to (mirrors
+    /// [`Product::product_id`]).
+    #[serde(default)]
+    pub product_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -370,6 +428,22 @@ pub struct SkuProperties {
     pub is_trial: Option<bool>,
     pub is_pre_order: Option<bool>,
     pub is_bundle: Option<bool>,
+    /// SKU display group IDs (shape undocumented — kept as `Value`).
+    #[serde(default)]
+    pub sku_display_group_ids: Option<serde_json::Value>,
+    /// Legacy platforms this SKU applies to.
+    #[serde(default)]
+    pub applicable_legacy_platforms: Option<Vec<ApplicableLegacyPlatform>>,
+    /// Developer-supplied opaque data (free-form — kept as `Value`).
+    #[serde(default)]
+    pub custom_developer_data: Option<serde_json::Value>,
+    /// Magazine-issue metadata for periodical products (shape undocumented).
+    #[serde(default)]
+    pub magazine_issue_data: Option<serde_json::Value>,
+    /// Quantity granted by a consumable SKU. Returned as an int or a quoted
+    /// string depending on the endpoint.
+    #[serde(default, deserialize_with = "de_str_or_i64")]
+    pub consumable_quantity: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -385,6 +459,9 @@ pub struct FulfillmentData {
     pub content: Option<serde_json::Value>,
     /// Per-package feature flags. Often `null`; schema not documented.
     pub package_features: Option<serde_json::Value>,
+    /// Store-side content identifier for the package (GUID).
+    #[serde(default)]
+    pub package_content_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -478,6 +555,10 @@ pub struct SkuMarketProperty {
     pub supported_languages: Option<Vec<String>>,
     pub package_ids: Option<serde_json::Value>,
     pub markets: Option<Vec<String>>,
+    /// Payment-instrument filter (same shape as
+    /// [`OrderManagementData::pi_filter`]); usually `null`.
+    #[serde(default, rename(serialize = "piFilter", deserialize = "PIFilter"))]
+    pub pi_filter: Option<PiFilter>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -497,8 +578,30 @@ pub struct SkuLocalizedProperty {
     pub text_resources: Option<serde_json::Value>,
     pub images: Option<Vec<serde_json::Value>>,
     pub legal_text: Option<LegalText>,
+    /// Web "blends" (commerce) display data for subscription / consumable SKUs.
+    #[serde(default)]
+    pub web_blends_data: Option<WebBlendsData>,
     pub language: Option<String>,
     pub markets: Option<Vec<String>>,
+}
+
+/// One entry in [`SkuProperties::applicable_legacy_platforms`].
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all(serialize = "camelCase", deserialize = "PascalCase"))]
+pub struct ApplicableLegacyPlatform {
+    pub legacy_platform_name: Option<String>,
+}
+
+/// Commerce display strings attached to a SKU localized property
+/// ([`SkuLocalizedProperty::web_blends_data`]).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all(serialize = "camelCase", deserialize = "PascalCase"))]
+pub struct WebBlendsData {
+    pub charge_frequency_string: Option<String>,
+    pub custom_web_blends_text: Option<String>,
+    pub link: Option<String>,
+    pub purchase_email_template: Option<String>,
+    pub trial_duration_string: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -534,6 +637,18 @@ pub struct Availability {
     pub sku_id: Option<String>,
     pub display_rank: Option<i64>,
     pub remediation_required: Option<bool>,
+    /// Affirmation identifier (age-gate / acceptance), present on some
+    /// game availabilities.
+    #[serde(default)]
+    pub affirmation_id: Option<String>,
+    /// Alternate identifiers attached to the availability (same shape as
+    /// [`AlternateId`]).
+    #[serde(default)]
+    pub alternate_ids: Option<Vec<AlternateId>>,
+    /// Remediation actions the client must take for this availability
+    /// (e.g. acquire a prerequisite). Present on some game listings.
+    #[serde(default)]
+    pub remediations: Option<Vec<Remediation>>,
     /// Subscription / entitlement-key data. Present (non-null) for paid
     /// content; `None` for free apps like Netflix.
     pub licensing_data: Option<LicensingData>,
@@ -542,6 +657,16 @@ pub struct Availability {
     /// regular `availabilities`.
     #[serde(rename(serialize = "productASchema", deserialize = "ProductASchema"))]
     pub product_a_schema: Option<String>,
+}
+
+/// One entry in [`Availability::remediations`].
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all(serialize = "camelCase", deserialize = "PascalCase"))]
+pub struct Remediation {
+    pub big_id: Option<String>,
+    pub remediation_id: Option<String>,
+    #[serde(rename(serialize = "type", deserialize = "Type"))]
+    pub r#type: Option<String>,
 }
 
 /// Subscription / entitlement-key data attached to an [`Availability`].
@@ -558,12 +683,23 @@ pub struct LicensingData {
 pub struct SatisfyingEntitlementKey {
     pub entitlement_keys: Option<Vec<String>>,
     pub licensing_key_ids: Option<Vec<String>>,
+    /// Pre-order release date (ISO 8601), present on pre-orderable titles.
+    #[serde(default)]
+    pub pre_order_release_date: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all(serialize = "camelCase", deserialize = "PascalCase"))]
 pub struct AvailabilityProperties {
     pub original_release_date: Option<String>,
+    /// Per-availability merchandising tags (note the `s` spelling — distinct
+    /// from [`Product::merchandizing_tags`], which the wire spells with a `z`).
+    /// Usually an empty array.
+    #[serde(default)]
+    pub merchandising_tags: Option<Vec<serde_json::Value>>,
+    /// Pre-order release date (ISO 8601) for pre-orderable availabilities.
+    #[serde(default)]
+    pub pre_order_release_date: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -573,6 +709,10 @@ pub struct OrderManagementData {
     #[serde(rename(serialize = "piFilter", deserialize = "PIFilter"))]
     pub pi_filter: Option<PiFilter>,
     pub price: Option<Price>,
+    #[serde(default)]
+    pub geofencing_policy_id: Option<String>,
+    #[serde(default)]
+    pub order_management_policy_id_override: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -586,6 +726,8 @@ pub struct Price {
     pub msrp: Option<f64>,
     pub tax_type: Option<String>,
     pub wholesale_currency_code: Option<String>,
+    #[serde(default)]
+    pub wholesale_price: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
