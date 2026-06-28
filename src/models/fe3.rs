@@ -185,6 +185,22 @@ pub struct PackageInstance {
     /// `<BlockMapDigest>` — hash of the package's `.appxblockmap.xml`.
     pub block_map_digest: Option<DigestEntry>,
 
+    /// **Ready-to-use** lowercase-hex SHA-1 of the exact bytes FE3 serves,
+    /// decoded from the primary `<File Digest>` (when `DigestAlgorithm` is
+    /// SHA1) or a matching `<AdditionalDigest>`. Compare directly against
+    /// `Get-FileHash -Algorithm SHA1` / `sha1sum`. `None` if FE3 carried no
+    /// SHA-1 for this file. (The raw base64 lives in [`Self::digest`] /
+    /// [`Self::additional_digests`].)
+    pub sha1: Option<String>,
+    /// **Ready-to-use** lowercase-hex SHA-256 of the exact bytes FE3 serves,
+    /// decoded from `<AdditionalDigest Algorithm="SHA256">` (or the primary
+    /// digest when it is SHA256). Compare directly against `Get-FileHash` /
+    /// `sha256sum`. This is the authoritative checksum for the downloaded
+    /// file — unlike DisplayCatalog's [`crate::models::catalog::Package::hash`],
+    /// which is base64 and frequently describes a different (storefront)
+    /// version. `None` if FE3 carried no SHA-256.
+    pub sha256: Option<String>,
+
     // ---------------------------------------------------------------
     // <ExtendedProperties> attributes (the rich variant — only some
     // updates carry these; lightweight packages have them all `None`)
@@ -322,6 +338,105 @@ impl PackageInstance {
             .unwrap_or(".appx");
         format!("{moniker}{ext}")
     }
+
+    /// Decode an FE3 digest value to lowercase hex. FE3 emits digests as
+    /// base64 (e.g. `"SvGxBAsz2gqDUc3zvlYYqJCElQ0="`); this returns the hex
+    /// form (`"4af1b104…"`). A value that is already hex (40 or 64 chars) is
+    /// passed through lowercased. Returns `None` for empty / undecodable input.
+    pub fn digest_to_hex(value: &str) -> Option<String> {
+        let t = value.trim();
+        if t.is_empty() {
+            return None;
+        }
+        // Already hex? (SHA-1 = 40, SHA-256 = 64 hex chars.)
+        if (t.len() == 40 || t.len() == 64) && t.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Some(t.to_ascii_lowercase());
+        }
+        base64_decode(t)
+            .filter(|bytes| !bytes.is_empty())
+            .map(|bytes| bytes_to_hex(&bytes))
+    }
+
+    /// Canonicalize a digest-algorithm label, tolerating separators / casing
+    /// (`"SHA-256"`, `"Sha 256"` → `"SHA256"`). Returns `None` for anything
+    /// other than SHA-1 / SHA-256.
+    fn normalize_algorithm(label: &str) -> Option<&'static str> {
+        let canon: String = label
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .collect::<String>()
+            .to_ascii_uppercase();
+        match canon.as_str() {
+            "SHA1" => Some("SHA1"),
+            "SHA256" => Some("SHA256"),
+            _ => None,
+        }
+    }
+
+    /// Pick the lowercase-hex digest for `want` (`"SHA1"` / `"SHA256"`) from a
+    /// primary `(digest, algorithm)` pair plus any `<AdditionalDigest>`
+    /// entries. Prefers the primary digest when its algorithm matches, else
+    /// the first matching additional digest. Used to populate
+    /// [`Self::sha1`] / [`Self::sha256`].
+    pub(crate) fn select_digest_hex(
+        digest: Option<&str>,
+        digest_algorithm: Option<&str>,
+        additional: &[DigestEntry],
+        want: &str,
+    ) -> Option<String> {
+        if let (Some(d), Some(alg)) = (digest, digest_algorithm) {
+            if Self::normalize_algorithm(alg) == Some(want) {
+                if let Some(hex) = Self::digest_to_hex(d) {
+                    return Some(hex);
+                }
+            }
+        }
+        additional
+            .iter()
+            .find(|e| Self::normalize_algorithm(&e.algorithm) == Some(want))
+            .and_then(|e| Self::digest_to_hex(&e.value))
+    }
+}
+
+/// Decode standard-alphabet base64 (ignoring `=` padding and whitespace) to
+/// bytes. Returns `None` on any invalid character.
+fn base64_decode(s: &str) -> Option<Vec<u8>> {
+    fn sextet(c: u8) -> Option<u8> {
+        Some(match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        })
+    }
+    let mut out = Vec::with_capacity(s.len() * 3 / 4);
+    let mut acc: u32 = 0;
+    let mut bits: u8 = 0;
+    for &c in s.as_bytes() {
+        if matches!(c, b'=' | b'\n' | b'\r' | b' ' | b'\t') {
+            continue;
+        }
+        acc = (acc << 6) | sextet(c)? as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    Some(out)
+}
+
+/// Lowercase-hex encode bytes.
+fn bytes_to_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        s.push(HEX[(b >> 4) as usize] as char);
+        s.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    s
 }
 
 /// Applicability metadata embedded in the FE3 SyncUpdates response.
@@ -447,6 +562,67 @@ mod tests {
         assert_eq!(
             PackageInstance::build_readable_file_name("Foo.Bar_1.0_x64", Some("guid.weird")),
             "Foo.Bar_1.0_x64.appx",
+        );
+    }
+
+    #[test]
+    fn digest_to_hex_decodes_base64() {
+        // Real values captured from a SyncUpdates <File>.
+        assert_eq!(
+            PackageInstance::digest_to_hex("SvGxBAsz2gqDUc3zvlYYqJCElQ0="),
+            Some("4af1b1040b33da0a8351cdf3be5618a89084950d".to_string()),
+        );
+        assert_eq!(
+            PackageInstance::digest_to_hex("Cdmft9WJDkWAcAH7YZGK70c++XfGi0qLtrjswxq0hF8="),
+            Some("09d99fb7d5890e45807001fb61918aef473ef977c68b4a8bb6b8ecc31ab4845f".to_string()),
+        );
+    }
+
+    #[test]
+    fn digest_to_hex_passes_through_existing_hex_lowercased() {
+        let hex40 = "4AF1B1040B33DA0A8351CDF3BE5618A89084950D";
+        assert_eq!(
+            PackageInstance::digest_to_hex(hex40),
+            Some(hex40.to_ascii_lowercase()),
+        );
+        assert_eq!(PackageInstance::digest_to_hex(""), None);
+    }
+
+    #[test]
+    fn select_digest_hex_matches_algorithm_tolerantly() {
+        let additional = vec![DigestEntry {
+            algorithm: "SHA-256".into(),
+            value: "Cdmft9WJDkWAcAH7YZGK70c++XfGi0qLtrjswxq0hF8=".into(),
+        }];
+        // SHA-1 from the primary digest, tolerating a "Sha 1" label.
+        assert_eq!(
+            PackageInstance::select_digest_hex(
+                Some("SvGxBAsz2gqDUc3zvlYYqJCElQ0="),
+                Some("Sha 1"),
+                &additional,
+                "SHA1",
+            ),
+            Some("4af1b1040b33da0a8351cdf3be5618a89084950d".to_string()),
+        );
+        // SHA-256 falls back to the AdditionalDigest (labelled "SHA-256").
+        assert_eq!(
+            PackageInstance::select_digest_hex(
+                Some("SvGxBAsz2gqDUc3zvlYYqJCElQ0="),
+                Some("SHA1"),
+                &additional,
+                "SHA256",
+            ),
+            Some("09d99fb7d5890e45807001fb61918aef473ef977c68b4a8bb6b8ecc31ab4845f".to_string()),
+        );
+        // Absent algorithm → None (never fabricated).
+        assert_eq!(
+            PackageInstance::select_digest_hex(
+                Some("SvGxBAsz2gqDUc3zvlYYqJCElQ0="),
+                Some("SHA1"),
+                &[],
+                "SHA256",
+            ),
+            None,
         );
     }
 

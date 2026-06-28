@@ -263,6 +263,14 @@ char* storelib_query_batch_json_with_cancel(
  *   "readableFileName"   : string         (<packageMoniker><real extension>;
  *                                          falls back to ".appx" if FE3 did
  *                                          not report a recognised one)
+ *   "sha1"               : string | null  (lowercase hex of the served bytes,
+ *                                          decoded from FE3's base64 digests —
+ *                                          compare against Get-FileHash SHA1)
+ *   "sha256"             : string | null  (lowercase hex of the served bytes —
+ *                                          the authoritative download checksum;
+ *                                          do NOT use DisplayCatalog's base64
+ *                                          Package.hash, which may be a
+ *                                          different version)
  *   "prerequisites"      : string[]       (FE3 dependency edges — Windows
  *                                          Update *category* GUIDs from
  *                                          <Relationships><Prerequisites>; one

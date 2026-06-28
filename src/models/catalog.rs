@@ -486,7 +486,17 @@ pub struct Package {
     pub framework_dependencies: Option<Vec<FrameworkDependency>>,
     pub hardware_dependencies: Option<Vec<serde_json::Value>>,
     pub hardware_requirements: Option<Vec<serde_json::Value>>,
+    /// DisplayCatalog package hash — **base64**, not hex (e.g.
+    /// `"Wm2/Ug7dcH/RTZbhH2lLcMbPUT4HpIOqqZn7NazAlsw="`; the algorithm is in
+    /// [`Self::hash_algorithm`]). NOT a reliable download checksum: DCat is the
+    /// *storefront* pipeline and frequently lists a different version than FE3
+    /// actually serves, so this hash is for bytes the user may never download.
+    /// To verify a downloaded package use the FE3 digests on the resolved
+    /// [`crate::models::fe3::PackageInstance`] — its ready-to-use
+    /// [`crate::models::fe3::PackageInstance::sha256`] /
+    /// [`crate::models::fe3::PackageInstance::sha1`] lowercase-hex fields.
     pub hash: Option<String>,
+    /// Algorithm for [`Self::hash`] (e.g. `"SHA256"`).
     pub hash_algorithm: Option<String>,
     pub is_streaming_app: Option<bool>,
     pub languages: Option<Vec<String>>,

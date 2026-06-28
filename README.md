@@ -224,8 +224,11 @@ try {
 
     const pkgs = await handler.getPackagesForProduct(null, ctrl.signal);
     // pkgs: Array<{ packageMoniker, packageUri, packageType, applicabilityBlob,
-    //               updateId, packageSize, prerequisites, … }>
+    //               updateId, packageSize, prerequisites, sha1, sha256, … }>
     //   prerequisites: FE3 dependency edges (Windows-Update category GUIDs)
+    //   sha1 / sha256: ready-to-use LOWERCASE HEX of the served bytes — compare
+    //     directly against Get-FileHash / sha256sum. (Do NOT use DisplayCatalog
+    //     Package.hash for this: it's base64 and may be a different version.)
 } catch (e) {
     if (e.kind === 'cancelled') return;
     if (e.kind === 'notFound') showNotFound();

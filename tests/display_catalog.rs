@@ -560,6 +560,60 @@ async fn fe3_capture_preserves_every_field_for_whatsapp() {
     );
 }
 
+/// The FE3 `sha256` digest must equal the SHA-256 of the actual downloaded
+/// bytes. Downloads the smallest resolved package (a framework like VCLibs,
+/// ~1 MB) to keep it cheap, then hashes it and compares.
+#[tokio::test]
+#[ignore]
+async fn fe3_sha256_matches_downloaded_file() {
+    use sha2::{Digest, Sha256};
+
+    let mut handler = make_handler();
+    handler
+        .query_dcat(NETFLIX_PRODUCT_ID, IdentifierType::ProductId, None)
+        .await
+        .expect("query_dcat should succeed");
+    let packages = handler
+        .get_packages_for_product(None)
+        .await
+        .expect("get_packages_for_product should succeed");
+
+    let pkg = packages
+        .iter()
+        .filter(|p| p.package_uri.is_some() && p.sha256.is_some())
+        .min_by_key(|p| p.file_size.unwrap_or(i64::MAX))
+        .expect("at least one package with a download URL and a sha256");
+
+    let url = pkg.package_uri.as_deref().unwrap();
+    let bytes = reqwest::get(url)
+        .await
+        .expect("download should send")
+        .bytes()
+        .await
+        .expect("download body should read");
+
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    let actual: String = hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+
+    assert_eq!(
+        actual,
+        pkg.sha256.as_deref().unwrap(),
+        "downloaded {} ({} bytes) sha256 must match FE3-advertised digest",
+        pkg.package_moniker,
+        bytes.len(),
+    );
+    // sha1 (when present) must be 40 hex chars; sha256 64.
+    assert_eq!(pkg.sha256.as_deref().map(str::len), Some(64));
+    if let Some(s) = pkg.sha1.as_deref() {
+        assert_eq!(s.len(), 40);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Localized query (non-US locale)
 // ---------------------------------------------------------------------------

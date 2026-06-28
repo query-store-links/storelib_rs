@@ -629,6 +629,22 @@ impl FE3Handler {
                 collect_extra(n, &["UpdateID", "RevisionNumber"], &mut extra_attributes);
             }
 
+            // Ready-to-use lowercase-hex digests of the exact bytes FE3
+            // serves, decoded from the base64 <File Digest> / <AdditionalDigest>
+            // values above so consumers don't have to decode + algorithm-match.
+            let sha1 = PackageInstance::select_digest_hex(
+                digest.as_deref(),
+                digest_algorithm.as_deref(),
+                &additional_digests,
+                "SHA1",
+            );
+            let sha256 = PackageInstance::select_digest_hex(
+                digest.as_deref(),
+                digest_algorithm.as_deref(),
+                &additional_digests,
+                "SHA256",
+            );
+
             // file_size: prefer <File Size>, fall back to
             // <ExtendedProperties MaxDownloadSize>. (DCat is the final
             // fallback, applied by display_catalog.)
@@ -655,6 +671,8 @@ impl FE3Handler {
                 additional_digests,
                 pieces_hash_digest,
                 block_map_digest,
+                sha1,
+                sha256,
 
                 handler,
                 is_appx_framework,
@@ -1236,6 +1254,45 @@ mod tests {
                 .map(String::as_str),
             Some("surprise"),
         );
+    }
+
+    #[tokio::test]
+    async fn get_package_instances_exposes_decoded_sha_hex() {
+        // <File> with a base64 SHA-1 Digest + a base64 SHA-256 AdditionalDigest
+        // (real values from a captured SyncUpdates response).
+        let xml = r#"<?xml version="1.0"?>
+<root>
+  <NewUpdates><UpdateInfo><ID>1</ID><Xml>
+    <UpdateIdentity UpdateID="u" RevisionNumber="1"/>
+    <ApplicabilityRules><Metadata><AppxPackageMetadata>
+      <AppxMetadata PackageMoniker="App.Pkg_1.0_x64__h" PackageType="AppX" IsAppxBundle="false">{}</AppxMetadata>
+    </AppxPackageMetadata></Metadata></ApplicabilityRules>
+  </Xml></UpdateInfo></NewUpdates>
+  <ExtendedUpdateInfo><Updates><Update><ID>1</ID><Xml>
+    <Files>
+      <File FileName="g.appxbundle" InstallerSpecificIdentifier="App.Pkg_1.0_x64__h" Digest="SvGxBAsz2gqDUc3zvlYYqJCElQ0=" DigestAlgorithm="SHA1" Size="100">
+        <AdditionalDigest Algorithm="SHA256">Cdmft9WJDkWAcAH7YZGK70c++XfGi0qLtrjswxq0hF8=</AdditionalDigest>
+      </File>
+    </Files>
+  </Xml></Update></Updates></ExtendedUpdateInfo>
+</root>"#;
+        let pkgs = FE3Handler::get_package_instances(xml).await.unwrap();
+        assert_eq!(pkgs.len(), 1);
+        let p = &pkgs[0];
+        // Decoded, ready-to-use lowercase hex.
+        assert_eq!(
+            p.sha1.as_deref(),
+            Some("4af1b1040b33da0a8351cdf3be5618a89084950d"),
+        );
+        assert_eq!(
+            p.sha256.as_deref(),
+            Some("09d99fb7d5890e45807001fb61918aef473ef977c68b4a8bb6b8ecc31ab4845f"),
+        );
+        assert_eq!(p.sha1.as_deref().map(str::len), Some(40));
+        assert_eq!(p.sha256.as_deref().map(str::len), Some(64));
+        // Raw base64 fields are preserved unchanged.
+        assert_eq!(p.digest.as_deref(), Some("SvGxBAsz2gqDUc3zvlYYqJCElQ0="));
+        assert_eq!(p.additional_digests.len(), 1);
     }
 
     #[tokio::test]
