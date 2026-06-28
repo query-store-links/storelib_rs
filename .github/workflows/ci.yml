@@ -1,0 +1,95 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly: exercise the live Microsoft Store API tests so upstream wire
+    # changes (new/changed fields) are caught by the round-trip audit guards.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Cancel superseded runs on the same ref to save CI minutes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  lint:
+    name: Lint (rustfmt + clippy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+      - name: clippy (default + ffi, warnings denied)
+        run: cargo clippy --all-targets --features ffi -- -D warnings
+
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Unit + integration + doctests. The live Microsoft Store API tests are
+      # marked #[ignore], so this stays fully offline and deterministic.
+      - name: cargo test
+        run: cargo test --locked
+      # The optional C / FFI feature must keep compiling on every platform.
+      - name: build (ffi feature)
+        run: cargo build --locked --features ffi
+
+  wasm:
+    name: WASM build + TypeScript typegen
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      # Node is required: build.rs runs tools/gen-ts.mjs to regenerate the
+      # TypeScript declarations embedded in the wasm-bindgen output.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: wasm
+      - name: cargo build (wasm32 + typegen)
+        run: cargo build --locked --target wasm32-unknown-unknown --features wasm
+      - name: Install wasm-pack
+        uses: jetli/wasm-pack-action@v0.4.0
+        with:
+          version: latest
+      - name: wasm-pack build (nodejs target)
+        run: wasm-pack build --dev --target nodejs -- --features wasm
+
+  live:
+    name: Live Microsoft Store API tests
+    # Network-dependent (#[ignore] by default). Run only on a schedule or on
+    # demand so flaky/changing upstream responses never block PRs.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test (ignored / live)
+        run: cargo test --locked --test display_catalog -- --ignored --nocapture
