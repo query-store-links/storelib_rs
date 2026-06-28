@@ -374,6 +374,34 @@ impl FE3Handler {
                 .and_then(|n| n.attribute("MainPackage"))
                 .and_then(|v| v.parse::<bool>().ok());
 
+            // ----- <Relationships>/<Prerequisites> dependency edges ------
+            // The AppxMetadata node lives in the NewUpdates fragment at
+            // Xml/ApplicabilityRules/Metadata/AppxPackageMetadata/AppxMetadata;
+            // the sibling <Relationships><Prerequisites> block under that same
+            // <Xml> carries this package's prerequisite category IDs. Walk up
+            // to the enclosing <Xml> and collect every UpdateID under a
+            // <Prerequisites> (these are WU *category* GUIDs — see
+            // `PackageInstance::prerequisites`). The package's own
+            // <UpdateIdentity> is a direct child of <Xml>, not under
+            // <Prerequisites>, so it is correctly excluded.
+            let prerequisites: Vec<String> = node
+                .ancestors()
+                .find(|a| a.tag_name().name() == "Xml")
+                .map(|xml_node| {
+                    xml_node
+                        .descendants()
+                        .filter(|d| d.tag_name().name() == "Prerequisites")
+                        .flat_map(|p| p.descendants())
+                        .filter(|d| d.tag_name().name() == "UpdateIdentity")
+                        .filter_map(|u| u.attribute("UpdateID").map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            debug!(
+                "FE3: package {moniker} has {} prerequisite category id(s)",
+                prerequisites.len()
+            );
+
             // file_size: prefer <File Size>, fall back to
             // <ExtendedProperties MaxDownloadSize>. (DCat is the final
             // fallback, applied by display_catalog.)
@@ -416,6 +444,8 @@ impl FE3Handler {
                 legacy_mobile_product_id,
 
                 main_package,
+
+                prerequisites,
 
                 all_file_locations: Vec::new(),
             });
@@ -706,5 +736,71 @@ mod tests {
     fn process_update_ids_invalid_xml_returns_error() {
         let result = FE3Handler::process_update_ids("not xml at all <<<");
         assert!(result.is_err());
+    }
+
+    // -- get_package_instances: prerequisites (dependency graph) -----------
+
+    /// Minimal SyncUpdates fragment mirroring the real wire shape: an
+    /// `AppxMetadata` nested under `Xml/ApplicabilityRules/Metadata/
+    /// AppxPackageMetadata`, with a sibling `<Relationships><Prerequisites>`
+    /// under the same `<Xml>` carrying two prerequisite category IDs.
+    const SYNC_WITH_PREREQS: &str = r#"<?xml version="1.0"?>
+<root>
+  <UpdateInfo>
+    <ID>1</ID>
+    <Xml>
+      <UpdateIdentity UpdateID="own-app-update-id" RevisionNumber="1"/>
+      <Properties><SecuredFragment/></Properties>
+      <Relationships>
+        <Prerequisites>
+          <AtLeastOne IsCategory="true">
+            <UpdateIdentity UpdateID="cat-framework-1"/>
+          </AtLeastOne>
+          <AtLeastOne IsCategory="true">
+            <UpdateIdentity UpdateID="cat-framework-2"/>
+          </AtLeastOne>
+        </Prerequisites>
+      </Relationships>
+      <ApplicabilityRules>
+        <Metadata>
+          <AppxPackageMetadata>
+            <AppxMetadata PackageMoniker="App.Pkg_1.0_x64__hash" PackageType="AppX" IsAppxBundle="false">{"content.packageId":"abc"}</AppxMetadata>
+          </AppxPackageMetadata>
+        </Metadata>
+      </ApplicabilityRules>
+    </Xml>
+  </UpdateInfo>
+</root>"#;
+
+    #[tokio::test]
+    async fn get_package_instances_extracts_prerequisites() {
+        let instances = FE3Handler::get_package_instances(SYNC_WITH_PREREQS)
+            .await
+            .unwrap();
+        assert_eq!(instances.len(), 1);
+        let inst = &instances[0];
+        assert_eq!(inst.package_moniker, "App.Pkg_1.0_x64__hash");
+        // Both prerequisite *category* IDs are captured, in document order.
+        assert_eq!(
+            inst.prerequisites,
+            vec!["cat-framework-1".to_string(), "cat-framework-2".to_string()],
+        );
+        // The package's own UpdateIdentity must NOT leak into prerequisites.
+        assert!(!inst.prerequisites.contains(&"own-app-update-id".to_string()));
+    }
+
+    #[tokio::test]
+    async fn get_package_instances_no_relationships_yields_empty_prereqs() {
+        // Same shape but no <Relationships> block at all.
+        let xml = r#"<?xml version="1.0"?>
+<root><UpdateInfo><ID>1</ID><Xml>
+  <UpdateIdentity UpdateID="x" RevisionNumber="1"/>
+  <ApplicabilityRules><Metadata><AppxPackageMetadata>
+    <AppxMetadata PackageMoniker="App.Pkg_1.0_x64__hash" PackageType="AppX" IsAppxBundle="false">{}</AppxMetadata>
+  </AppxPackageMetadata></Metadata></ApplicabilityRules>
+</Xml></UpdateInfo></root>"#;
+        let instances = FE3Handler::get_package_instances(xml).await.unwrap();
+        assert_eq!(instances.len(), 1);
+        assert!(instances[0].prerequisites.is_empty());
     }
 }

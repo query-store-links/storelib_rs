@@ -98,6 +98,23 @@ mod cli {
             #[arg(long)]
             token: Option<String>,
         },
+        /// Show the dependency map for a product (DisplayCatalog framework /
+        /// platform dependencies, resolved to downloadable FE3 packages, plus
+        /// the FE3 prerequisite graph).
+        Deps {
+            /// Product ID (or other ID type, see --type)
+            id: String,
+            /// Identifier type
+            #[arg(long = "type", default_value = "product-id")]
+            id_type: IdType,
+            /// MSA authentication token (for sandboxed/flighted listings)
+            #[arg(long)]
+            token: Option<String>,
+            /// Skip the FE3 round-trip; only show DisplayCatalog's declared
+            /// dependency map (faster — one HTTP request).
+            #[arg(long)]
+            no_fe3: bool,
+        },
         /// Search the store catalog
         Search {
             /// Search query string
@@ -387,6 +404,128 @@ mod cli {
                 }
             }
 
+            Command::Deps {
+                id,
+                id_type,
+                token,
+                no_fe3,
+            } => {
+                log::info!("Command: deps id={id}");
+                // Verbose per-stage process reporting (dcat.dependencies,
+                // fe3.prerequisites, per-package prereq counts, …); the clean
+                // dependency-map summary still prints at the end. Raise
+                // --log-level to debug/trace for the full HTTP / SOAP trace.
+                let mut handler = DisplayCatalogHandler::production();
+                install_progress(&mut handler);
+                if let Err(e) = handler
+                    .query_dcat(&id, id_type.into(), token.as_deref())
+                    .await
+                {
+                    report_error("query_dcat failed", &e);
+                    return;
+                }
+
+                let title = handler.title().unwrap_or("<no title>").to_owned();
+                let pfn = handler
+                    .product()
+                    .and_then(|p| p.properties.as_ref())
+                    .and_then(|pr| pr.package_family_name.as_deref())
+                    .unwrap_or("<none>")
+                    .to_owned();
+                log::info!("Product: {title}  (pfn={pfn})");
+
+                // --- DisplayCatalog's declared (named) dependency map ------
+                let fw = handler.framework_dependencies();
+                let plat = handler.platform_dependencies();
+
+                log::info!("DisplayCatalog framework dependencies ({}):", fw.len());
+                for d in &fw {
+                    log::info!(
+                        "  - {}  (minVersion {})",
+                        d.package_identity.as_deref().unwrap_or("<unknown>"),
+                        render_version(d.min_version.as_ref()),
+                    );
+                }
+                log::info!("DisplayCatalog platform dependencies ({}):", plat.len());
+                for d in &plat {
+                    log::info!(
+                        "  - {}  (minVersion {} / maxTested {})",
+                        d.platform_name.as_deref().unwrap_or("<unknown>"),
+                        render_version(d.min_version.as_ref()),
+                        render_version(d.max_tested.as_ref()),
+                    );
+                }
+
+                if no_fe3 {
+                    return;
+                }
+
+                // --- FE3 resolved packages + dependency graph -------------
+                let packages = match handler.get_packages_for_product(token.as_deref()).await {
+                    Ok(p) => p,
+                    Err(e) => {
+                        report_error("get_packages_for_product failed", &e);
+                        return;
+                    }
+                };
+                log::info!("FE3 returned {} package(s).", packages.len());
+
+                // Resolve each declared framework dependency to the matching
+                // downloadable FE3 packages (matched by moniker family).
+                log::info!("Framework dependency -> downloadable FE3 package(s):");
+                for d in &fw {
+                    let want = d.package_identity.as_deref().unwrap_or("");
+                    // FE3 can return the same framework package more than once
+                    // (a product with several bundle versions pulls identical
+                    // deps); dedup by moniker for the summary.
+                    let mut seen_moniker = std::collections::HashSet::new();
+                    let matches: Vec<&PackageInstance> = packages
+                        .iter()
+                        .filter(|p| package_family(&p.package_moniker).eq_ignore_ascii_case(want))
+                        .filter(|p| seen_moniker.insert(p.package_moniker.clone()))
+                        .collect();
+                    if matches.is_empty() {
+                        log::warn!("  {want}: not served under this name in the FE3 set");
+                    } else {
+                        log::info!("  {want}: {} package(s)", matches.len());
+                        for p in matches {
+                            log::info!(
+                                "      • {} ({} bytes){}",
+                                p.package_moniker,
+                                p.file_size
+                                    .map(|s| s.to_string())
+                                    .unwrap_or_else(|| "?".into()),
+                                if p.package_uri.is_some() {
+                                    ""
+                                } else {
+                                    "  [no url]"
+                                },
+                            );
+                        }
+                    }
+                }
+
+                // FE3's own dependency graph: the per-package prerequisite
+                // category IDs from <Relationships><Prerequisites>.
+                let with_prereqs = packages.iter().filter(|p| !p.prerequisites.is_empty()).count();
+                log::info!(
+                    "FE3 prerequisite edges ({}/{} packages declare prerequisites; ids are WU category GUIDs):",
+                    with_prereqs,
+                    packages.len(),
+                );
+                for p in &packages {
+                    if p.prerequisites.is_empty() {
+                        continue;
+                    }
+                    log::info!(
+                        "  {} -> {} prerequisite(s): {}",
+                        p.package_moniker,
+                        p.prerequisites.len(),
+                        p.prerequisites.join(", "),
+                    );
+                }
+            }
+
             Command::Search {
                 query,
                 family,
@@ -481,6 +620,44 @@ mod cli {
                 c => c,
             })
             .collect()
+    }
+
+    /// Package family of a moniker / PFN — everything before the first `_`.
+    /// `"Microsoft.VCLibs.140.00_14.0.33519.0_x64__8wekyb3d8bbwe"` →
+    /// `"Microsoft.VCLibs.140.00"`, which is the form DisplayCatalog uses for
+    /// `FrameworkDependency.package_identity`.
+    fn package_family(moniker: &str) -> &str {
+        moniker.split('_').next().unwrap_or(moniker)
+    }
+
+    /// Decode a Microsoft packed quad-version integer into `a.b.c.d`. The
+    /// value packs four 16-bit fields: `(a<<48)|(b<<32)|(c<<16)|d`. This is the
+    /// form DisplayCatalog uses for `FrameworkDependencies[].minVersion` /
+    /// `maxTested` and `PlatformDependencies[]` versions.
+    fn decode_quad_version(v: i64) -> String {
+        let a = (v >> 48) & 0xFFFF;
+        let b = (v >> 32) & 0xFFFF;
+        let c = (v >> 16) & 0xFFFF;
+        let d = v & 0xFFFF;
+        format!("{a}.{b}.{c}.{d}")
+    }
+
+    /// Best-effort render of a DisplayCatalog version field (which arrives as
+    /// either an integer or a numeric string) as a readable quad version.
+    /// Falls back to the raw rendering for non-numeric values.
+    fn render_version(v: Option<&serde_json::Value>) -> String {
+        match v {
+            None => "?".into(),
+            Some(serde_json::Value::Number(n)) => n
+                .as_i64()
+                .map(decode_quad_version)
+                .unwrap_or_else(|| n.to_string()),
+            Some(serde_json::Value::String(s)) => s
+                .parse::<i64>()
+                .map(decode_quad_version)
+                .unwrap_or_else(|_| s.clone()),
+            Some(other) => other.to_string(),
+        }
     }
 
     /// Known framework / dependency package families that are part of

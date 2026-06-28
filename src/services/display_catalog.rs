@@ -6,8 +6,8 @@ use futures_util::future::{select, Either};
 use crate::cancellation::CancellationToken;
 use crate::error::StoreError;
 use crate::models::catalog::{
-    Availability, DisplayCatalogModel, Image, Package, Price, Product, ProductLocalizedProperty,
-    Sku,
+    Availability, DisplayCatalogModel, FrameworkDependency, Image, Package, PlatformDependency,
+    Price, Product, ProductLocalizedProperty, Sku,
 };
 use crate::models::enums::{DCatEndpoint, DeviceFamily, DisplayCatalogResult, IdentifierType};
 use crate::models::fe3::PackageInstance;
@@ -431,6 +431,47 @@ impl DisplayCatalogHandler {
             .unwrap_or(&[])
     }
 
+    /// Every distinct framework / runtime dependency declared across the
+    /// current product's packages — DisplayCatalog's `FrameworkDependencies`.
+    ///
+    /// This is the *named* dependency map: each entry carries the dependency's
+    /// package-identity (PFN base, e.g. `"Microsoft.VCLibs.140.00"`,
+    /// `"Microsoft.WindowsAppRuntime.1.6"`) plus the minimum version the app
+    /// was built against (a packed quad-version `i64`/string). Deduplicated by
+    /// `package_identity` — the same framework is repeated on every
+    /// architecture package, so this collapses them to one entry each.
+    ///
+    /// For FE3's raw category-id dependency edges (the same graph expressed as
+    /// Windows-Update category GUIDs) see
+    /// [`crate::models::fe3::PackageInstance::prerequisites`].
+    pub fn framework_dependencies(&self) -> Vec<&FrameworkDependency> {
+        let mut seen = std::collections::HashSet::new();
+        self.packages()
+            .iter()
+            .flat_map(|p| p.framework_dependencies.as_deref().unwrap_or(&[]))
+            .filter(|d| match d.package_identity.as_deref() {
+                Some(id) => seen.insert(id.to_owned()),
+                None => true,
+            })
+            .collect()
+    }
+
+    /// Every distinct platform dependency (e.g. `Windows.Universal`,
+    /// `Windows.Desktop`) declared across the current product's packages —
+    /// DisplayCatalog's `PlatformDependencies`. Deduplicated by
+    /// `platform_name`.
+    pub fn platform_dependencies(&self) -> Vec<&PlatformDependency> {
+        let mut seen = std::collections::HashSet::new();
+        self.packages()
+            .iter()
+            .flat_map(|p| p.platform_dependencies.as_deref().unwrap_or(&[]))
+            .filter(|d| match d.platform_name.as_deref() {
+                Some(n) => seen.insert(n.to_owned()),
+                None => true,
+            })
+            .collect()
+    }
+
     /// `WuCategoryId` from the first SKU's fulfillment data. This is what
     /// `get_packages_for_product` uses internally to query FE3.
     pub fn wu_category_id(&self) -> Option<&str> {
@@ -554,6 +595,30 @@ impl DisplayCatalogHandler {
             self.product_listing = Some(model);
             self.result = Some(DisplayCatalogResult::Found);
             self.is_found = true;
+
+            // Verbose dependency-map reporting: surface the declared framework
+            // / platform dependency counts as soon as the listing is parsed,
+            // so subscribers see the dependency picture without a second call.
+            let fw = self.framework_dependencies();
+            let plat = self.platform_dependencies();
+            debug!(
+                "DCat dependencies: {} framework, {} platform",
+                fw.len(),
+                plat.len(),
+            );
+            for d in &fw {
+                debug!(
+                    "  framework dep: {} (minVersion {:?})",
+                    d.package_identity.as_deref().unwrap_or("<unknown>"),
+                    d.min_version,
+                );
+            }
+            self.progress.emit_counter(
+                "dcat.dependencies",
+                format!("{} framework, {} platform", fw.len(), plat.len()),
+                fw.len() as u32,
+                (fw.len() + plat.len()) as u32,
+            );
             Ok(())
         } else if status == reqwest::StatusCode::NOT_FOUND {
             warn!("DCat: product not found (id={id})");
@@ -756,6 +821,21 @@ impl DisplayCatalogHandler {
             instances.len() as u32,
             instances.len() as u32,
         );
+
+        // Verbose dependency-graph reporting: total the FE3 prerequisite edges
+        // (WU category IDs) parsed onto the package instances.
+        let total_prereq_edges: usize = instances.iter().map(|i| i.prerequisites.len()).sum();
+        let pkgs_with_prereqs = instances.iter().filter(|i| !i.prerequisites.is_empty()).count();
+        debug!(
+            "FE3: {total_prereq_edges} prerequisite edge(s) across {pkgs_with_prereqs}/{} package(s)",
+            instances.len(),
+        );
+        self.progress.emit_counter(
+            "fe3.prerequisites",
+            format!("{total_prereq_edges} dependency edge(s) across {pkgs_with_prereqs} package(s)"),
+            pkgs_with_prereqs as u32,
+            instances.len() as u32,
+        );
         // Per-package fan-out so subscribers can render a live list. Message
         // format `"<moniker> | updateId=<id>"` so the frontend can correlate
         // a later `fe3.linkReceived` (which also names the update_id) back
@@ -765,7 +845,12 @@ impl DisplayCatalogHandler {
             let uid = update_ids.get(i).map(String::as_str).unwrap_or("");
             self.progress.emit_counter(
                 "fe3.packageFound",
-                format!("{} | updateId={}", inst.package_moniker, uid),
+                format!(
+                    "{} | updateId={} | prereqs={}",
+                    inst.package_moniker,
+                    uid,
+                    inst.prerequisites.len(),
+                ),
                 (i + 1) as u32,
                 total_pkgs,
             );
@@ -900,7 +985,7 @@ impl DisplayCatalogHandler {
             self.progress.emit_counter(
                 "fe3.packageResolved",
                 format!(
-                    "{} | uri={} | size={} | digest={} | locs={} | updateId={}",
+                    "{} | uri={} | size={} | digest={} | locs={} | prereqs={} | updateId={}",
                     instance.package_moniker,
                     instance.package_uri.as_deref().unwrap_or("<none>"),
                     instance
@@ -909,6 +994,7 @@ impl DisplayCatalogHandler {
                         .unwrap_or_else(|| "?".into()),
                     instance.digest.as_deref().unwrap_or("?"),
                     instance.all_file_locations.len(),
+                    instance.prerequisites.len(),
                     instance.update_id,
                 ),
                 (i + 1) as u32,
@@ -1299,6 +1385,67 @@ mod tests {
         assert_eq!(h.packages().len(), 2);
         assert_eq!(h.packages()[0].package_full_name.as_deref(), Some("X.Y_1"),);
         assert_eq!(h.packages()[1].max_download_size_in_bytes, Some(5678));
+    }
+
+    #[test]
+    fn framework_and_platform_dependencies_dedup_across_packages() {
+        // Two architecture packages declaring the same framework set — the
+        // accessor must collapse them to one entry per package_identity /
+        // platform_name (mirrors the real DCat shape for WhatsApp etc.).
+        let json = r#"{
+            "Products":[{
+                "DisplaySkuAvailabilities":[{
+                    "Sku":{"Properties":{"Packages":[
+                        {
+                            "PackageFullName":"App_1.0_x64__h",
+                            "FrameworkDependencies":[
+                                {"PackageIdentity":"Microsoft.VCLibs.140.00","MinVersion":3940651870650368,"MaxTested":0},
+                                {"PackageIdentity":"Microsoft.WindowsAppRuntime.1.6","MinVersion":1688852089373523968,"MaxTested":0}
+                            ],
+                            "PlatformDependencies":[
+                                {"PlatformName":"Windows.Universal","MinVersion":2814751014977536,"MaxTested":2814751014977536},
+                                {"PlatformName":"Windows.Desktop","MinVersion":2814751014977536,"MaxTested":2814751014977536}
+                            ]
+                        },
+                        {
+                            "PackageFullName":"App_1.0_arm64__h",
+                            "FrameworkDependencies":[
+                                {"PackageIdentity":"Microsoft.VCLibs.140.00","MinVersion":3940651870650368,"MaxTested":0}
+                            ],
+                            "PlatformDependencies":[
+                                {"PlatformName":"Windows.Universal","MinVersion":2814751014977536,"MaxTested":2814751014977536}
+                            ]
+                        }
+                    ]}}
+                }]
+            }]
+        }"#;
+        let h = handler_with_listing(json);
+        let fw = h.framework_dependencies();
+        // VCLibs (in both packages) collapses to one; WindowsAppRuntime once.
+        assert_eq!(fw.len(), 2);
+        let names: Vec<&str> = fw
+            .iter()
+            .filter_map(|d| d.package_identity.as_deref())
+            .collect();
+        assert!(names.contains(&"Microsoft.VCLibs.140.00"));
+        assert!(names.contains(&"Microsoft.WindowsAppRuntime.1.6"));
+
+        let plat = h.platform_dependencies();
+        assert_eq!(plat.len(), 2);
+        let pnames: Vec<&str> = plat
+            .iter()
+            .filter_map(|d| d.platform_name.as_deref())
+            .collect();
+        assert!(pnames.contains(&"Windows.Universal"));
+        assert!(pnames.contains(&"Windows.Desktop"));
+    }
+
+    #[test]
+    fn dependency_accessors_empty_on_bare_handler() {
+        let h = DisplayCatalogHandler::production();
+        assert!(h.framework_dependencies().is_empty());
+        assert!(h.platform_dependencies().is_empty());
     }
 
     #[test]

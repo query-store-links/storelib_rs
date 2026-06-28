@@ -174,6 +174,24 @@ char* storelib_price_json(const StorelibHandle* handle);
 char* storelib_packages_listed_json(const StorelibHandle* handle);
 
 /**
+ * Return the product's distinct framework dependencies (DisplayCatalog
+ * FrameworkDependencies, deduped by packageIdentity) as a JSON array — the
+ * named dependency map: [{"packageIdentity","minVersion","maxTested"}].
+ * Returns "[]" if no listing is loaded.
+ * Caller frees with storelib_free_string().
+ */
+char* storelib_framework_dependencies_json(const StorelibHandle* handle);
+
+/**
+ * Return the product's distinct platform dependencies (DisplayCatalog
+ * PlatformDependencies, deduped by platformName) as a JSON array:
+ * [{"platformName","minVersion","maxTested"}].
+ * Returns "[]" if no listing is loaded.
+ * Caller frees with storelib_free_string().
+ */
+char* storelib_platform_dependencies_json(const StorelibHandle* handle);
+
+/**
  * Return all `Availability` entries flattened across the product's SKUs,
  * as a JSON array. Returns "[]" if no listing is loaded.
  * Caller frees with storelib_free_string().
@@ -245,6 +263,12 @@ char* storelib_query_batch_json_with_cancel(
  *   "readableFileName"   : string         (<packageMoniker><real extension>;
  *                                          falls back to ".appx" if FE3 did
  *                                          not report a recognised one)
+ *   "prerequisites"      : string[]       (FE3 dependency edges — Windows
+ *                                          Update *category* GUIDs from
+ *                                          <Relationships><Prerequisites>; one
+ *                                          is the product's own WuCategoryId.
+ *                                          For named deps use
+ *                                          storelib_framework_dependencies_json.)
  *
  * @param handle     A valid handle after a successful storelib_query().
  * @param msa_token  Optional auth token, or NULL.

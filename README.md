@@ -10,6 +10,7 @@ Supports native (tokio), **WebAssembly**, and **C / FFI** targets.
 - **Batch lookup** — fetch many products in one HTTP round-trip via `bigIds`
 - Resolve direct `.appx` / `.msix` / `.eappx` download URLs via the FE3 delivery service
 - **Typed product accessors** — `handler.title()`, `.price()`, `.packages()`, `.images_with_purpose()` etc. walk the catalog tree without `display_sku_availabilities.as_deref()?.first()?...` chains
+- **Dependency map** — `handler.framework_dependencies()` / `.platform_dependencies()` expose the named runtime deps (`Microsoft.VCLibs.140.00`, `Microsoft.WindowsAppRuntime.*`, `Windows.Universal`, …) DisplayCatalog declares per package; resolved package instances additionally carry FE3's raw `prerequisites` dependency edges
 - Search the catalog by query string and device family
 - 7 endpoints (Production, Int, Xbox, XboxInt, Dev, OneP, OnePInt)
 - 259 markets + 185 ISO 639-1 languages + 350 Microsoft Store BCP-47 language tags (sourced from the IANA registry + `learn.microsoft.com`'s supported-languages table)
@@ -81,6 +82,31 @@ for product in handler.products() {
 
 `query_dcat_batch` accepts Microsoft Store Product IDs only — the `bigIds` endpoint doesn't support alternate identifiers.
 
+### Inspect the dependency map
+
+```rust
+handler.query_dcat("9NKSQGP7F2NH", IdentifierType::ProductId, None).await?; // WhatsApp
+
+// DisplayCatalog's *named* dependency map — one entry per distinct framework,
+// each with a PFN base and the minimum version the app was built against.
+for dep in handler.framework_dependencies() {
+    println!("{:?} (minVersion {:?})", dep.package_identity, dep.min_version);
+    // e.g. "Microsoft.VCLibs.140.00", "Microsoft.WindowsAppRuntime.1.6"
+}
+for plat in handler.platform_dependencies() {
+    println!("{:?}", plat.platform_name); // "Windows.Universal", "Windows.Desktop"
+}
+
+// FE3 expresses the same graph as raw Windows-Update *category* IDs on each
+// resolved package (one of them is the product's own WuCategoryId):
+let packages = handler.get_packages_for_product(None).await?;
+for pkg in &packages {
+    if !pkg.prerequisites.is_empty() {
+        println!("{} depends on categories {:?}", pkg.package_moniker, pkg.prerequisites);
+    }
+}
+```
+
 ### Resolve package download URLs
 
 ```rust
@@ -146,9 +172,11 @@ Stages emitted during `query_dcat` / `get_packages_for_product` / `search_dcat`:
 
 | Operation             | Stages |
 | --------------------- | ------ |
-| `query_dcat`          | `dcat.request` → `dcat.response` → `dcat.parse` → `dcat.done` (or `dcat.notFound`) |
-| `get_packages_for_product` | `fe3.start` → `fe3.getCookie` → `fe3.syncUpdates` → `fe3.parseUpdateIds`[`.done`] → `fe3.parsePackages`[`.done`] → `fe3.resolveUrls`[`.done`] → `fe3.done` |
+| `query_dcat`          | `dcat.request` → `dcat.response` → `dcat.parse` → `dcat.done` → `dcat.dependencies` (or `dcat.notFound`) |
+| `get_packages_for_product` | `fe3.start` → `fe3.getCookie` → `fe3.syncUpdates` → `fe3.parseUpdateIds`[`.done`] → `fe3.parsePackages`[`.done`] → `fe3.prerequisites` → `fe3.resolveUrls`[`.done`] → `fe3.done` |
 | `search_dcat`         | `search.request` → `search.response` → `search.parse` → `search.done` |
+
+The `dcat.dependencies` and `fe3.prerequisites` stages carry the dependency-map counts in `current`/`total` (framework/total deps, and packages-with-prerequisites/total packages respectively); `fe3.packageFound` / `fe3.packageResolved` messages include a `prereqs=N` field.
 
 `.done` counter stages populate `current`/`total` with `N` of `N` items processed.
 
@@ -181,8 +209,14 @@ try {
     // Typed accessors on the handler — read fields without hand-walking the model.
     console.log(handler.title, handler.publisherName, handler.price);
 
+    // Named dependency map straight off the handler.
+    console.log(handler.frameworkDependencies); // [{ packageIdentity, minVersion, maxTested }, …]
+    console.log(handler.platformDependencies);  // [{ platformName, minVersion, maxTested }, …]
+
     const pkgs = await handler.getPackagesForProduct(null, ctrl.signal);
-    // pkgs: Array<{ packageMoniker, packageUri, packageType, applicabilityBlob, updateId, packageSize }>
+    // pkgs: Array<{ packageMoniker, packageUri, packageType, applicabilityBlob,
+    //               updateId, packageSize, prerequisites, … }>
+    //   prerequisites: FE3 dependency edges (Windows-Update category GUIDs)
 } catch (e) {
     if (e.kind === 'cancelled') return;
     if (e.kind === 'notFound') showNotFound();
@@ -207,7 +241,7 @@ for (const {code, englishName} of listLanguageTags()) {
 
 The `idType` argument to `queryDcat` is tolerant — `"ProductId"`, `"productId"`, `"product-id"`, and `"PRODUCT_ID"` all resolve to the same enum.
 
-The handler exposes typed JS getters for common fields: `title`, `description`, `publisherName`, `price`, `prices`, `packages`, `availabilities`, `products`, `wuCategoryId`, `lastModifiedDate`, plus `imagesWithPurpose("Logo" | "Tile" | "Screenshot" | …)`.
+The handler exposes typed JS getters for common fields: `title`, `description`, `publisherName`, `price`, `prices`, `packages`, `frameworkDependencies`, `platformDependencies`, `availabilities`, `products`, `wuCategoryId`, `lastModifiedDate`, plus `imagesWithPurpose("Logo" | "Tile" | "Screenshot" | …)`.
 
 ## CLI usage
 
@@ -217,6 +251,7 @@ storelib_rs [--log-level <LEVEL>] <COMMAND>
 Commands:
   packages  Fetch direct download URLs for a product's packages
   query     Query detailed product information
+  deps      Show the dependency map for a product
   search    Search the store catalog
 
 Options:
@@ -231,6 +266,13 @@ storelib_rs packages 9wzdncrfj3tj
 
 # Query by Package Family Name
 storelib_rs query NETFLIX.APP_mcm4njqhnhss8 --type pfn
+
+# Show a product's dependency map (DCat named deps -> downloadable FE3 packages
+# + FE3 prerequisite graph)
+storelib_rs deps 9NKSQGP7F2NH
+
+# Just DisplayCatalog's declared deps, no FE3 round-trip (one HTTP request)
+storelib_rs deps 9NKSQGP7F2NH --no-fe3
 
 # Search for Xbox games
 storelib_rs search halo --family xbox

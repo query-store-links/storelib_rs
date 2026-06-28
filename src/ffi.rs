@@ -271,6 +271,47 @@ pub unsafe extern "C" fn storelib_packages_listed_json(
     }
 }
 
+/// Return the product's distinct framework dependencies (DisplayCatalog
+/// `FrameworkDependencies`, deduped by `packageIdentity`) as a JSON array —
+/// the *named* dependency map (`{packageIdentity, minVersion, maxTested}`).
+/// Returns `"[]"` when none are listed. Caller frees with
+/// [`storelib_free_string`].
+///
+/// # Safety
+/// `handle` must be a valid non-null pointer.
+#[no_mangle]
+pub unsafe extern "C" fn storelib_framework_dependencies_json(
+    handle: *const StorelibHandle,
+) -> *mut c_char {
+    if handle.is_null() {
+        return std::ptr::null_mut();
+    }
+    match serde_json::to_string(&(*handle).handler.framework_dependencies()) {
+        Ok(json) => cstring_into_raw(json),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Return the product's distinct platform dependencies (DisplayCatalog
+/// `PlatformDependencies`, deduped by `platformName`) as a JSON array.
+/// Returns `"[]"` when none are listed. Caller frees with
+/// [`storelib_free_string`].
+///
+/// # Safety
+/// `handle` must be a valid non-null pointer.
+#[no_mangle]
+pub unsafe extern "C" fn storelib_platform_dependencies_json(
+    handle: *const StorelibHandle,
+) -> *mut c_char {
+    if handle.is_null() {
+        return std::ptr::null_mut();
+    }
+    match serde_json::to_string(&(*handle).handler.platform_dependencies()) {
+        Ok(json) => cstring_into_raw(json),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
 /// Return all `Availability` entries flattened across SKUs as a JSON array.
 /// Returns `"[]"` (a valid empty JSON array) when none exist.
 /// Caller frees with [`storelib_free_string`].

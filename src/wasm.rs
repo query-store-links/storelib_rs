@@ -496,15 +496,20 @@ impl DisplayCatalogHandlerJs {
     /// `current`/`total` are `null` except for counter-style stages.
     ///
     /// Stages currently emitted:
-    /// - `dcat.request`, `dcat.response`, `dcat.parse`, `dcat.done`, `dcat.notFound`
+    /// - `dcat.request`, `dcat.response`, `dcat.parse`, `dcat.done`,
+    ///   `dcat.dependencies` *(framework / platform dependency counts;
+    ///   `current`/`total` = framework count / framework+platform)*,
+    ///   `dcat.notFound`
     /// - `fe3.start`, `fe3.getCookie`, `fe3.syncUpdates`,
     ///   `fe3.parseUpdateIds`, `fe3.parseUpdateIds.done`,
     ///   `fe3.parsePackages`, `fe3.parsePackages.done`,
-    ///   `fe3.packageFound` *(per package; `message` = moniker)*,
+    ///   `fe3.prerequisites` *(dependency-edge totals;
+    ///   `current`/`total` = packages-with-prereqs / total packages)*,
+    ///   `fe3.packageFound` *(per package; `message` includes `prereqs=N`)*,
     ///   `fe3.resolveUrls`, `fe3.resolveUrls.done`,
     ///   `fe3.linkReceived` *(per URL; `message` = URL)*,
-    ///   `fe3.packageResolved` *(per package; `message` =
-    ///   `"<moniker> | size=<bytes> | uri=<url>"`)*,
+    ///   `fe3.packageResolved` *(per package; `message` includes
+    ///   `size=`, `uri=`, `prereqs=`)*,
     ///   `fe3.done`
     /// - `search.request`, `search.response`, `search.parse`, `search.done`
     /// - `retry.wait`, `retry.attempt`
@@ -545,10 +550,13 @@ impl DisplayCatalogHandlerJs {
     /// Requires `queryDcat` to have been called successfully first.
     ///
     /// Returns `Array<{packageMoniker, packageUri, packageType, applicabilityBlob,
-    /// updateId, packageSize}>`. `packageSize` is in bytes; prefer it over a
-    /// HEAD request on `packageUri`. It's `null` only for framework packages
-    /// that DCat doesn't list a size for. Pass an `AbortSignal` to cancel
-    /// stalled FE3 SOAP calls.
+    /// updateId, packageSize, prerequisites, …}>`. `packageSize` is in bytes;
+    /// prefer it over a HEAD request on `packageUri`. It's `null` only for
+    /// framework packages that DCat doesn't list a size for. `prerequisites`
+    /// is the package's FE3 dependency edges (Windows-Update category GUIDs);
+    /// for the *named* framework dependency map use the handler's
+    /// `frameworkDependencies` getter. Pass an `AbortSignal` to cancel stalled
+    /// FE3 SOAP calls.
     #[wasm_bindgen(
         js_name = getPackagesForProduct,
         unchecked_return_type = "PackageInstance[]"
@@ -705,6 +713,22 @@ impl DisplayCatalogHandlerJs {
     #[wasm_bindgen(getter, unchecked_return_type = "Package[]")]
     pub fn packages(&self) -> Result<JsValue, JsError> {
         to_js(self.inner.packages()).map_err(js_err)
+    }
+
+    /// Distinct framework / runtime dependencies declared across the product's
+    /// packages (DisplayCatalog `FrameworkDependencies`) — the *named*
+    /// dependency map (`packageIdentity` + `minVersion`), deduplicated by
+    /// `packageIdentity`.
+    #[wasm_bindgen(getter, js_name = frameworkDependencies, unchecked_return_type = "FrameworkDependency[]")]
+    pub fn framework_dependencies(&self) -> Result<JsValue, JsError> {
+        to_js(&self.inner.framework_dependencies()).map_err(js_err)
+    }
+
+    /// Distinct platform dependencies (`Windows.Universal`, `Windows.Desktop`,
+    /// …) declared across the product's packages.
+    #[wasm_bindgen(getter, js_name = platformDependencies, unchecked_return_type = "PlatformDependency[]")]
+    pub fn platform_dependencies(&self) -> Result<JsValue, JsError> {
+        to_js(&self.inner.platform_dependencies()).map_err(js_err)
     }
 
     /// All `Availability` entries flattened across the product's SKUs.

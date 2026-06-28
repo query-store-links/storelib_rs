@@ -127,6 +127,21 @@ pub struct PackageInstance {
     pub main_package: Option<bool>,
 
     // ---------------------------------------------------------------
+    // <Relationships> / <Prerequisites> (FE3 dependency graph)
+    // ---------------------------------------------------------------
+    /// Prerequisite Windows-Update **category** IDs for this package, taken
+    /// from `<Relationships><Prerequisites>…<UpdateIdentity UpdateID="…"/>`
+    /// in the `SyncUpdates` response. These are *category* GUIDs, not update
+    /// GUIDs: one of them is the product's own `WuCategoryId`, and the rest
+    /// identify the framework categories (VCLibs, WindowsAppRuntime, .NET
+    /// Native, …) the package depends on. This is FE3's native expression of
+    /// the package dependency graph — it does **not** name the dependencies;
+    /// for human-readable PFNs use DisplayCatalog's
+    /// [`crate::models::catalog::FrameworkDependency`] instead. Empty when the
+    /// update declared no prerequisites.
+    pub prerequisites: Vec<String>,
+
+    // ---------------------------------------------------------------
     // <FileLocation> entries (GetExtendedUpdateInfo2)
     // ---------------------------------------------------------------
     /// Every URL FE3 returned for this update, including blockmap URLs
@@ -244,6 +259,8 @@ mod tests {
             json.contains("\"readableFileName\":\"Microsoft.Test_1.0_x64.appx\""),
             "got: {json}",
         );
+        // New dependency field serializes under its camelCase wire name.
+        assert!(json.contains("\"prerequisites\":[]"), "got: {json}");
         // No snake_case or PascalCase leaks.
         assert!(!json.contains("file_size"), "got: {json}");
         assert!(!json.contains("file_name"), "got: {json}");
